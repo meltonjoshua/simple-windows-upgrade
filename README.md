@@ -22,9 +22,25 @@ A PowerShell script designed for silent deployment of Windows 11 upgrades throug
 
 ### One-Line GitHub Execution
 
+#### Option 1: Variable Method (Recommended)
+
+```powershell
+$url = "https://raw.githubusercontent.com/meltonjoshua/simple-windows-upgrade/main/Upgrade-Windows11.ps1"; iex (iwr -UseBasicParsing $url).Content
+```
+
+#### Option 2: Direct Method
+
 ```powershell
 iex (iwr -UseBasicParsing "https://raw.githubusercontent.com/meltonjoshua/simple-windows-upgrade/main/Upgrade-Windows11.ps1").Content
 ```
+
+#### Option 3: Short URL (for terminals with line wrapping issues)
+
+```powershell
+$u="https://tinyurl.com/win11-upgrade-script"; iex (iwr -UseBasicParsing $u).Content
+```
+
+⚠️ **IMPORTANT**: Run PowerShell as Administrator for registry modifications!
 
 ### Direct Execution
 

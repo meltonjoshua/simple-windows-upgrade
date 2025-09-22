@@ -47,6 +47,25 @@ if ($IsInteractive -and -not $RunningFromOneLiner) {
 $CurrentStep++
 Update-Progress "Windows 11 Upgrade" "Initializing upgrade process..." $CurrentStep
 
+# Check if running as Administrator
+$IsAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+if (-not $IsAdmin) {
+    Write-Warning "⚠️  This script requires Administrator privileges to modify registry keys."
+    Write-Host "Please run PowerShell as Administrator and try again." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Right-click PowerShell → 'Run as Administrator'" -ForegroundColor Cyan
+    
+    if ($KeepOpen) {
+        Write-Host ""
+        Write-Host "Press any key to close this window..." -ForegroundColor Yellow
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
+    exit 1
+}
+
+Write-Host "✅ Running with Administrator privileges" -ForegroundColor Green
+
 # Create temp directory if needed
 if (-not (Test-Path $TempDir)) {
     Write-Host "Creating temporary directory: $TempDir" -ForegroundColor Yellow
@@ -67,12 +86,17 @@ $regItems = @(
  
 foreach ($item in $regItems) {
     Write-Host "Setting registry key: $($item.Description)" -ForegroundColor Yellow
-    if (-not (Test-Path $item.Path)) {
-        New-Item -Path $item.Path -Force | Out-Null
-        Write-Host "  Created registry path: $($item.Path)" -ForegroundColor Green
+    try {
+        if (-not (Test-Path $item.Path)) {
+            New-Item -Path $item.Path -Force | Out-Null
+            Write-Host "  Created registry path: $($item.Path)" -ForegroundColor Green
+        }
+        New-ItemProperty -Path $item.Path -Name $item.Name -Value 1 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+        Write-Host "  Set $($item.Path)\$($item.Name) = 1" -ForegroundColor Green
+    } catch {
+        Write-Warning "  Failed to set $($item.Path)\$($item.Name): $($_.Exception.Message)"
+        Write-Host "  This may affect upgrade compatibility on unsupported hardware." -ForegroundColor Yellow
     }
-    New-ItemProperty -Path $item.Path -Name $item.Name -Value 1 -PropertyType DWord -Force | Out-Null
-    Write-Host "  Set $($item.Path)\$($item.Name) = 1" -ForegroundColor Green
 }
  
 # ----- DOWNLOAD INSTALLER -----
