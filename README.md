@@ -29,7 +29,14 @@ iex (iwr -UseBasicParsing "https://raw.githubusercontent.com/meltonjoshua/simple
 ### Direct Execution
 
 ```powershell
+# Basic execution
 .\Upgrade-Windows11.ps1
+
+# Keep PowerShell window open to view results
+.\Upgrade-Windows11.ps1 -KeepOpen
+
+# Run silently without progress bar (for automation)
+.\Upgrade-Windows11.ps1 -ShowProgress:$false
 ```
 
 ### RMM Deployment
@@ -52,8 +59,23 @@ The script now includes:
 - File verification and size reporting
 - Detailed logging of each action
 - Clear success/error indicators
+- **Auto-pause**: Keeps window open when run interactively
+- **Manual control**: Use `-KeepOpen` parameter to force window to stay open
 
 ## Script Behavior
+
+### Parameters
+
+- `-KeepOpen`: Forces the PowerShell window to stay open after completion
+- `-ShowProgress`: Controls progress bar display (default: `$true`)
+
+### Automatic Detection
+
+The script automatically detects:
+
+- **Interactive sessions**: Keeps window open for manual execution
+- **RMM/Automation**: Closes immediately for automated deployment
+- **One-liner execution**: Optimized behavior for GitHub one-liner
 
 ### Registry Keys Modified
 

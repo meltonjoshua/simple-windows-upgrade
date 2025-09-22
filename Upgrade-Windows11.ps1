@@ -6,6 +6,11 @@
   Designed for deployment through an RMM.
   Must be executed with administrative rights.
 #>
+
+param(
+    [switch]$KeepOpen,  # Add this parameter to keep window open
+    [switch]$ShowProgress = $true  # Show progress by default
+)
  
 # ----- CONFIG -----
 $TempDir     = "C:\Temp"
@@ -23,9 +28,19 @@ function Update-Progress {
         [string]$Status,
         [int]$Step
     )
-    $PercentComplete = ($Step / $TotalSteps) * 100
-    Write-Progress -Activity $Activity -Status $Status -PercentComplete $PercentComplete
-    Write-Host "[$Step/$TotalSteps] $Status" -ForegroundColor Cyan
+    if ($ShowProgress) {
+        $PercentComplete = ($Step / $TotalSteps) * 100
+        Write-Progress -Activity $Activity -Status $Status -PercentComplete $PercentComplete
+        Write-Host "[$Step/$TotalSteps] $Status" -ForegroundColor Cyan
+    }
+}
+
+# Detect if running from one-liner (no console attached) or RMM
+$IsInteractive = [Environment]::UserInteractive -and ![Console]::IsOutputRedirected
+$RunningFromOneLiner = $MyInvocation.Line -match "iex.*iwr|Invoke-Expression.*Invoke-WebRequest"
+
+if ($IsInteractive -and -not $RunningFromOneLiner) {
+    $KeepOpen = $true  # Auto-enable for interactive sessions
 }
 
 # Step 1: Initialize
@@ -113,7 +128,9 @@ Write-Host "" -ForegroundColor Yellow
 $process = Start-Process -FilePath $Installer -ArgumentList $arguments -PassThru -Wait
 
 # Complete progress bar
-Write-Progress -Activity "Windows 11 Upgrade" -Completed
+if ($ShowProgress) {
+    Write-Progress -Activity "Windows 11 Upgrade" -Completed
+}
 
 # Show final status
 if ($process.ExitCode -eq 0) {
@@ -124,6 +141,13 @@ if ($process.ExitCode -eq 0) {
     Write-Host "❌ Windows 11 upgrade completed with errors." -ForegroundColor Red
     Write-Host "   Exit Code: $($process.ExitCode)" -ForegroundColor Red
     Write-Host "   Check $LogFile for error details." -ForegroundColor Red
+}
+
+# Keep window open if requested or running interactively
+if ($KeepOpen) {
+    Write-Host ""
+    Write-Host "Press any key to close this window..." -ForegroundColor Yellow
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 }
  
 # Return installer exit code to RMM
