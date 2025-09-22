@@ -5,8 +5,10 @@ A PowerShell script designed for silent deployment of Windows 11 upgrades throug
 ## Features
 
 - **Silent Operation**: Runs without user interaction
+- **Progress Tracking**: Visual progress bar and detailed status messages
 - **Registry Bypass**: Sets registry keys to allow upgrades on unsupported hardware
 - **Automatic Download**: Downloads the latest Windows 11 Installation Assistant
+- **File Verification**: Verifies downloaded installer before execution
 - **Logging**: Creates upgrade logs for monitoring and troubleshooting
 - **RMM Compatible**: Returns proper exit codes for RMM integration
 
@@ -34,11 +36,22 @@ iex (iwr -UseBasicParsing "https://raw.githubusercontent.com/meltonjoshua/simple
 
 Deploy the script through your RMM system with administrative privileges. The script will:
 
-1. Create necessary temporary directories
-2. Set registry keys to bypass hardware compatibility checks
-3. Download the Windows 11 Installation Assistant
-4. Run the upgrade silently
-5. Return exit code to the RMM system
+1. **Initialize**: Create necessary temporary directories
+2. **Configure Registry**: Set registry keys to bypass hardware compatibility checks
+3. **Download**: Download the Windows 11 Installation Assistant with progress tracking
+4. **Verify**: Verify the downloaded installer file
+5. **Execute**: Run the upgrade silently with detailed status messages
+6. **Complete**: Return exit code to the RMM system
+
+### Progress Tracking
+
+The script now includes:
+
+- Visual progress bar showing completion percentage
+- Step-by-step status messages
+- File verification and size reporting
+- Detailed logging of each action
+- Clear success/error indicators
 
 ## Script Behavior
 
