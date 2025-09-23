@@ -767,15 +767,80 @@ try {
     $exitCode = $process.ExitCode
     Write-Log "Installer exit code: $exitCode" "INFO"
     
+    # Interpret exit codes for Windows 11 Installation Assistant
+    $exitCodeMeaning = switch ($exitCode) {
+        0 { "Success - Upgrade completed successfully" }
+        1 { "General error or user cancellation" }
+        2 { "Invalid command line arguments" }
+        3 { "System restart required to continue upgrade" }
+        4 { "Insufficient disk space" }
+        5 { "Another instance is running or access denied" }
+        6 { "Unsupported operating system" }
+        7 { "Network connection error" }
+        8 { "Windows Update service unavailable" }
+        9 { "Hardware compatibility check failed" }
+        10 { "User account control (UAC) restriction" }
+        -1 { "Unexpected error occurred" }
+        default { "Unknown exit code - check Windows 11 compatibility" }
+    }
+    
+    Write-Log "Exit code meaning: $exitCodeMeaning" "INFO"
+    
     if ($exitCode -eq 0) {
         Write-Log "🎉 Windows 11 upgrade completed successfully!" "SUCCESS"
         if (-not $AutomaticMode) {
             Write-Host "🎉 Windows 11 upgrade completed successfully!" -ForegroundColor Green
         }
-    } else {
-        Write-Log "❌ Upgrade completed with exit code: $exitCode" "WARNING"
+    } elseif ($exitCode -eq 3) {
+        Write-Log "🔄 System restart required - upgrade will continue after reboot" "INFO"
+        if ($AutomaticMode -or $ForceRestart) {
+            Write-Log "🤖 Scheduling automatic restart..." "INFO"
+            
+            # Create scheduled task to continue after restart
+            $taskAction = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"iex (iwr -Uri 'https://raw.githubusercontent.com/meltonjoshua/simple-windows-upgrade/main/Upgrade-Windows11-Fixed.ps1' -UseBasicParsing).Content`""
+            $taskTrigger = New-ScheduledTaskTrigger -AtStartup
+            $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+            $taskPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+            
+            try {
+                Register-ScheduledTask -TaskName "ContinueWindows11Upgrade" -Action $taskAction -Trigger $taskTrigger -Settings $taskSettings -Principal $taskPrincipal -Force
+                Write-Log "✅ Scheduled task created for post-restart continuation" "SUCCESS"
+            } catch {
+                Write-Log "⚠️  Could not create scheduled task: $($_.Exception.Message)" "WARNING"
+            }
+            
+            Start-Process "shutdown.exe" -ArgumentList "/r", "/t", "60", "/c", "Windows 11 upgrade requires restart - continuing in 60 seconds" -WindowStyle Hidden
+        } else {
+            Write-Log "⚠️  Manual restart required to complete upgrade" "WARNING"
+        }
+    } elseif ($exitCode -eq 5) {
+        Write-Log "⚠️  Exit code 5: Another instance may be running or access denied" "WARNING"
+        Write-Log "🔄 This often indicates the upgrade is already in progress in background" "INFO"
+        Write-Log "💡 Check Task Manager for Windows11InstallationAssistant or wait a few minutes" "INFO"
+        
+        # Check if upgrade is actually in progress
+        $upgradeProcesses = Get-Process | Where-Object { 
+            $_.ProcessName -like "*Windows11*" -or 
+            $_.ProcessName -like "*setup*" -or 
+            $_.MainWindowTitle -like "*Windows 11*"
+        }
+        
+        if ($upgradeProcesses) {
+            Write-Log "✅ Found active upgrade processes - upgrade likely in progress" "SUCCESS"
+            foreach ($proc in $upgradeProcesses) {
+                Write-Log "Active: $($proc.ProcessName) (PID: $($proc.Id))" "INFO"
+            }
+        } else {
+            Write-Log "❌ No active upgrade processes found - may need manual intervention" "WARNING"
+        }
+        
         if (-not $AutomaticMode) {
-            Write-Host "⚠️  Upgrade completed with warnings. Check log for details." -ForegroundColor Yellow
+            Write-Host "⚠️  Upgrade initiated but needs verification. Check if Windows 11 upgrade is running in background." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Log "❌ Upgrade completed with exit code: $exitCode ($exitCodeMeaning)" "WARNING"
+        if (-not $AutomaticMode) {
+            Write-Host "⚠️  Upgrade completed with warnings. Exit code: $exitCode - $exitCodeMeaning" -ForegroundColor Yellow
         }
     }
     
