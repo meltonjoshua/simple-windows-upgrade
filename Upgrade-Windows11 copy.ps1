@@ -710,48 +710,101 @@ try {
     Write-Log "Installer process completed after $([math]::Round($totalTime.TotalMinutes, 1)) minutes" "INFO"
     Write-Log "Exit code: $($process.ExitCode)" "INFO"
     
-    # If process exited very quickly, investigate why
-    if ($totalTime.TotalMinutes -lt 1) {
-        Write-Log "Process completed very quickly - investigating potential issues..." "WARNING"
-        
-        # Check if Windows 11 Installation Assistant created any error files
-        $errorFiles = Get-ChildItem "C:\Temp" | Where-Object { 
-            $_.Name -like "*error*" -or 
-            $_.Name -like "*fail*" -or 
-            $_.Name -like "*Windows11*" 
-        }
-        
-        if ($errorFiles) {
-            Write-Log "Found potential error files in C:\Temp:" "WARNING"
-            foreach ($file in $errorFiles) {
-                Write-Log "  $($file.Name) - Modified: $($file.LastWriteTime)" "WARNING"
-            }
-        }
-        
-        # Check Windows Event Log for recent errors
-        try {
-            $recentErrors = Get-WinEvent -FilterHashtable @{
-                LogName='Application','System'
-                Level=2,3  # Error and Warning
-                StartTime=(Get-Date).AddMinutes(-5)
-            } -MaxEvents 5 -ErrorAction SilentlyContinue | Where-Object {
-                $_.Message -like "*Windows*" -or 
-                $_.Message -like "*upgrade*" -or 
-                $_.Message -like "*install*"
+        # If process exited very quickly, investigate why
+        if ($totalTime.TotalMinutes -lt 1) {
+            Write-Log "Process completed very quickly - investigating potential issues..." "WARNING"
+            
+            # Check if Windows 11 Installation Assistant created any error files
+            $errorFiles = Get-ChildItem "C:\Temp" | Where-Object { 
+                $_.Name -like "*error*" -or 
+                $_.Name -like "*fail*" -or 
+                $_.Name -like "*Windows11*" 
             }
             
-            if ($recentErrors) {
-                Write-Log "Recent Windows-related errors found:" "WARNING"
-                foreach ($error in $recentErrors) {
-                    Write-Log "  [$($error.TimeCreated)] $($error.LevelDisplayName): $($error.Message.Substring(0, [Math]::Min(100, $error.Message.Length)))..." "WARNING"
+            if ($errorFiles) {
+                Write-Log "Found potential error files in C:\Temp:" "WARNING"
+                foreach ($file in $errorFiles) {
+                    Write-Log "  $($file.Name) - Modified: $($file.LastWriteTime)" "WARNING"
                 }
             }
-        } catch {
-            Write-Log "Could not check Windows Event Log" "WARNING"
-        }
-    }
-    
-} catch {
+            
+            # Try to run installer interactively to get more info
+            Write-Log "Attempting interactive run to capture any dialogs..." "INFO"
+            try {
+                $interactiveProcess = Start-Process -FilePath $Installer -PassThru -WindowStyle Hidden
+                Start-Sleep 5  # Give it time to show any dialogs
+                
+                if (-not $interactiveProcess.HasExited) {
+                    Write-Log "Interactive installer is still running - may be showing dialogs" "INFO"
+                    $interactiveProcess.Kill()
+                } else {
+                    Write-Log "Interactive installer also exited quickly (Exit: $($interactiveProcess.ExitCode))" "INFO"
+                }
+            } catch {
+                Write-Log "Could not run interactive test: $($_.Exception.Message)" "WARNING"
+            }
+            
+            # Check Windows compatibility directly
+            Write-Log "Checking Windows 11 readiness..." "INFO"
+            try {
+                $currentOS = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                $currentBuild = [int]$currentOS.CurrentBuild
+                
+                if ($currentBuild -ge 22000) {
+                    Write-Log "DIAGNOSIS: System is already Windows 11 or newer (Build $currentBuild)" "WARNING"
+                    Write-Log "The Installation Assistant detected this and exited without upgrading" "WARNING"
+                } elseif ($currentBuild -eq 19045) {
+                    Write-Log "DIAGNOSIS: Windows 10 22H2 (Build 19045) - should be upgradeable" "INFO"
+                    Write-Log "Quick exit suggests hardware compatibility issue despite bypass" "WARNING"
+                } else {
+                    Write-Log "DIAGNOSIS: Windows 10 Build $currentBuild - checking compatibility" "INFO"
+                }
+                
+                # Check if PC meets basic requirements
+                $cpu = Get-WmiObject -Class Win32_Processor | Select-Object -First 1
+                $cpuName = $cpu.Name
+                Write-Log "CPU Model: $cpuName" "INFO"
+                
+                # Check if CPU is on supported list (basic check)
+                if ($cpuName -like "*i3-*" -or $cpuName -like "*i5-*" -or $cpuName -like "*i7-*" -or $cpuName -like "*i9-*") {
+                    if ($cpuName -like "*-[1-7]*") {
+                        Write-Log "POTENTIAL ISSUE: CPU appears to be 7th gen Intel or older" "WARNING"
+                        Write-Log "Windows 11 officially requires 8th gen Intel or newer" "WARNING"
+                    } else {
+                        Write-Log "CPU appears to be compatible" "SUCCESS"
+                    }
+                }
+                
+            } catch {
+                Write-Log "Could not perform Windows 11 readiness check" "WARNING"
+            }
+            
+            # Check Windows Event Log for recent errors
+            try {
+                $recentErrors = Get-WinEvent -FilterHashtable @{
+                    LogName='Application','System'
+                    Level=2,3  # Error and Warning
+                    StartTime=(Get-Date).AddMinutes(-5)
+                } -MaxEvents 5 -ErrorAction SilentlyContinue | Where-Object {
+                    $_.Message -like "*Windows*" -or 
+                    $_.Message -like "*upgrade*" -or 
+                    $_.Message -like "*install*" -or
+                    $_.Message -like "*compatibility*"
+                }
+                
+                if ($recentErrors) {
+                    Write-Log "Recent Windows-related errors found:" "WARNING"
+                    foreach ($error in $recentErrors) {
+                        $shortMessage = $error.Message.Substring(0, [Math]::Min(150, $error.Message.Length))
+                        Write-Log "  [$($error.TimeCreated)] $($error.LevelDisplayName): $shortMessage..." "WARNING"
+                    }
+                } else {
+                    Write-Log "No relevant recent errors found in Event Log" "INFO"
+                }
+            } catch {
+                Write-Log "Could not check Windows Event Log" "WARNING"
+            }
+        }} catch {
     Write-Log "Failed to start installer process: $($_.Exception.Message)" "ERROR"
     $process = @{ ExitCode = -1 }
     $totalTime = New-TimeSpan -Seconds 0
