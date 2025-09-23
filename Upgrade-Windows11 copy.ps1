@@ -463,11 +463,22 @@ try {
     Write-Log "Installer process started with PID: $($process.Id)" "SUCCESS"
     
     # Monitor the process
-    $checkInterval = 30 # seconds
+    $checkInterval = 10 # Check every 10 seconds instead of 30
     $lastLogCheck = Get-Date
+    $processStillRunning = $true
     
-    while (-not $process.HasExited) {
+    while (-not $process.HasExited -and $processStillRunning) {
         Start-Sleep $checkInterval
+        
+        # Double-check if process is actually still running
+        try {
+            $runningProcess = Get-Process -Id $process.Id -ErrorAction Stop
+            $processStillRunning = $true
+        } catch {
+            Write-Log "Process $($process.Id) no longer found in process list" "WARNING"
+            $processStillRunning = $false
+            break
+        }
         
         # Check if log file has been updated
         if (Test-Path $LogFile) {
@@ -487,22 +498,96 @@ try {
             }
         }
         
+        # Check for other Windows 11 related processes
+        $relatedProcesses = Get-Process | Where-Object {
+            $_.ProcessName -like "*Windows11*" -or 
+            $_.ProcessName -like "*setup*" -or 
+            $_.ProcessName -like "*install*" -or
+            $_.Description -like "*Windows*upgrade*" -or
+            $_.Description -like "*setup*"
+        } | Where-Object { $_.Id -ne $process.Id }
+        
+        if ($relatedProcesses) {
+            $processNames = ($relatedProcesses | ForEach-Object { "$($_.Name)($($_.Id))" }) -join ", "
+            Write-Log "Related processes detected: $processNames" "INFO"
+        }
+        
         # Show process is still running
         $elapsed = (Get-Date) - $startTime
         Write-Log "Installation running for $([math]::Round($elapsed.TotalMinutes, 1)) minutes..." "INFO"
+        
+        # If process runs longer than 2 minutes, check if it's actually doing something
+        if ($elapsed.TotalMinutes -gt 2) {
+            try {
+                $processInfo = Get-Process -Id $process.Id
+                $cpuTime = $processInfo.CPU
+                Write-Log "Process CPU time: $([math]::Round($cpuTime, 2)) seconds" "INFO"
+                
+                # If CPU time is very low after 2 minutes, the process might be stuck
+                if ($cpuTime -lt 1) {
+                    Write-Log "Process appears to be idle (low CPU usage)" "WARNING"
+                }
+            } catch {
+                Write-Log "Unable to get process information" "WARNING"
+            }
+        }
     }
     
     # Wait for process to fully complete
-    $process.WaitForExit()
+    if ($processStillRunning) {
+        $process.WaitForExit()
+    }
     $endTime = Get-Date
     $totalTime = $endTime - $startTime
     
     Write-Log "Installer process completed after $([math]::Round($totalTime.TotalMinutes, 1)) minutes" "INFO"
     Write-Log "Exit code: $($process.ExitCode)" "INFO"
     
+    # If process exited very quickly, investigate why
+    if ($totalTime.TotalMinutes -lt 1) {
+        Write-Log "Process completed very quickly - investigating potential issues..." "WARNING"
+        
+        # Check if Windows 11 Installation Assistant created any error files
+        $errorFiles = Get-ChildItem "C:\Temp" | Where-Object { 
+            $_.Name -like "*error*" -or 
+            $_.Name -like "*fail*" -or 
+            $_.Name -like "*Windows11*" 
+        }
+        
+        if ($errorFiles) {
+            Write-Log "Found potential error files in C:\Temp:" "WARNING"
+            foreach ($file in $errorFiles) {
+                Write-Log "  $($file.Name) - Modified: $($file.LastWriteTime)" "WARNING"
+            }
+        }
+        
+        # Check Windows Event Log for recent errors
+        try {
+            $recentErrors = Get-WinEvent -FilterHashtable @{
+                LogName='Application','System'
+                Level=2,3  # Error and Warning
+                StartTime=(Get-Date).AddMinutes(-5)
+            } -MaxEvents 5 -ErrorAction SilentlyContinue | Where-Object {
+                $_.Message -like "*Windows*" -or 
+                $_.Message -like "*upgrade*" -or 
+                $_.Message -like "*install*"
+            }
+            
+            if ($recentErrors) {
+                Write-Log "Recent Windows-related errors found:" "WARNING"
+                foreach ($error in $recentErrors) {
+                    Write-Log "  [$($error.TimeCreated)] $($error.LevelDisplayName): $($error.Message.Substring(0, [Math]::Min(100, $error.Message.Length)))..." "WARNING"
+                }
+            }
+        } catch {
+            Write-Log "Could not check Windows Event Log" "WARNING"
+        }
+    }
+    
 } catch {
     Write-Log "Failed to start installer process: $($_.Exception.Message)" "ERROR"
     $process = @{ ExitCode = -1 }
+    $totalTime = New-TimeSpan -Seconds 0
 } finally {
     # Stop background monitoring
     if ($monitoringJob) {
@@ -566,6 +651,43 @@ if ($process.ExitCode -eq 0) {
         if (Test-Path $logPath) {
             Write-Log "Found additional log: $logPath" "INFO"
         }
+    }
+    
+    # Additional diagnostics for quick exits
+    if ($totalTime.TotalMinutes -lt 1) {
+        Write-Log "" "INFO"
+        Write-Log "=== QUICK EXIT DIAGNOSTICS ===" "INFO"
+        
+        # Check if system is already Windows 11
+        try {
+            $currentOS = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+            if ([int]$currentOS.CurrentBuild -ge 22000) {
+                Write-Log "LIKELY CAUSE: System is already running Windows 11 (Build $($currentOS.CurrentBuild))" "WARNING"
+                Write-Log "The Installation Assistant detected this and exited without upgrading" "WARNING"
+            }
+        } catch {
+            Write-Log "Could not determine current Windows build" "WARNING"
+        }
+        
+        # Check if PC Health Check might block upgrade
+        $pcHealthCheck = Get-Process -Name "PCHealthCheck" -ErrorAction SilentlyContinue
+        if ($pcHealthCheck) {
+            Write-Log "PC Health Check app is running - this might interfere with upgrade" "WARNING"
+        }
+        
+        # Check Windows Update policies
+        try {
+            $wuPolicy = Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -ErrorAction SilentlyContinue
+            if ($wuPolicy -and $wuPolicy.DisableWindowsUpdateAccess) {
+                Write-Log "Windows Update is disabled by policy - this may prevent upgrades" "WARNING"
+            }
+        } catch {
+            # Policy key doesn't exist, which is normal
+        }
+        
+        Write-Log "RECOMMENDATION: Try running the installer manually to see error dialogs:" "INFO"
+        Write-Log "  1. Run: C:\Temp\Windows11InstallationAssistant.exe" "INFO"
+        Write-Log "  2. Look for error messages or compatibility warnings" "INFO"
     }
 }
 
