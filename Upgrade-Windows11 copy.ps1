@@ -903,9 +903,9 @@ try {
                 
                 if ($recentErrors) {
                     Write-Log "🔍 Recent Windows-related errors found:" "WARNING"
-                    foreach ($error in $recentErrors) {
-                        $shortMessage = $error.Message.Substring(0, [Math]::Min(120, $error.Message.Length))
-                        Write-Log "   [$($error.TimeCreated.ToString('HH:mm:ss'))] $($error.LevelDisplayName): $shortMessage..." "WARNING"
+                    foreach ($eventEntry in $recentErrors) {
+                        $shortMessage = $eventEntry.Message.Substring(0, [Math]::Min(120, $eventEntry.Message.Length))
+                        Write-Log "   [$($eventEntry.TimeCreated.ToString('HH:mm:ss'))] $($eventEntry.LevelDisplayName): $shortMessage..." "WARNING"
                     }
                 } else {
                     Write-Log "✅ No relevant recent errors found in Event Log" "SUCCESS"
