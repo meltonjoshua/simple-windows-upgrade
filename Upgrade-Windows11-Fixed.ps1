@@ -756,46 +756,95 @@ try {
     # Additional permission and environment setup for Installation Assistant
     Write-Log "🔧 Preparing Installation Assistant environment..." "INFO"
     
-    # Create Windows.old backup directory with proper permissions (installer expects this)
-    $windowsOldPath = "C:\Windows.old"
-    if (-not (Test-Path $windowsOldPath)) {
+    # Create and set permissions on ALL directories the installer might use
+    $criticalDirectories = @(
+        "C:\Windows.old",
+        "C:\ProgramData\Microsoft\Windows\Setup",
+        "C:\Windows\SoftwareDistribution\Download",
+        "C:\Windows\Temp",
+        "$env:USERPROFILE\AppData\Local\Temp",
+        "$env:USERPROFILE\AppData\Local\Microsoft\Windows\INetCache",
+        "$env:LOCALAPPDATA\Microsoft\Windows\Setup",
+        "C:\`$Windows.~BT",
+        "C:\`$Windows.~WS"
+    )
+    
+    foreach ($dir in $criticalDirectories) {
+        if (-not (Test-Path $dir)) {
+            try {
+                New-Item -Path $dir -ItemType Directory -Force | Out-Null
+                Write-Log "✅ Created directory: $dir" "SUCCESS"
+            } catch {
+                Write-Log "⚠️  Could not create directory: $dir" "WARNING"
+                continue
+            }
+        }
+        
+        # Set full permissions on each directory
         try {
-            New-Item -Path $windowsOldPath -ItemType Directory -Force | Out-Null
-            Write-Log "✅ Created Windows.old directory" "SUCCESS"
+            $acl = Get-Acl $dir
+            
+            # Add current user permissions
+            $userRule = New-Object System.Security.AccessControl.FileSystemAccessRule($env:USERNAME, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            $acl.SetAccessRule($userRule)
+            
+            # Add SYSTEM permissions
+            $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule("SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            $acl.SetAccessRule($systemRule)
+            
+            # Add Administrators permissions
+            $adminRule = New-Object System.Security.AccessControl.FileSystemAccessRule("Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            $acl.SetAccessRule($adminRule)
+            
+            Set-Acl -Path $dir -AclObject $acl -ErrorAction SilentlyContinue
+            Write-Log "✅ Set permissions on: $dir" "SUCCESS"
         } catch {
-            Write-Log "⚠️  Could not create Windows.old directory" "WARNING"
+            Write-Log "⚠️  Could not set permissions on: $dir" "WARNING"
         }
     }
     
-    # Set additional environment variables that Installation Assistant uses
-    $env:LOCALAPPDATA = "$env:USERPROFILE\AppData\Local"
-    $env:ProgramData = "C:\ProgramData"
-    [Environment]::SetEnvironmentVariable("LOCALAPPDATA", $env:LOCALAPPDATA, "Process")
-    [Environment]::SetEnvironmentVariable("ProgramData", $env:ProgramData, "Process")
-    
-    # Ensure ProgramData has proper permissions
-    try {
-        $programDataAcl = Get-Acl "C:\ProgramData"
-        $fullControlRule = New-Object System.Security.AccessControl.FileSystemAccessRule($env:USERNAME, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-        $programDataAcl.SetAccessRule($fullControlRule)
-        Set-Acl -Path "C:\ProgramData" -AclObject $programDataAcl -ErrorAction SilentlyContinue
-        Write-Log "✅ Ensured ProgramData permissions" "SUCCESS"
-    } catch {
-        Write-Log "⚠️  Could not set ProgramData permissions" "WARNING"
+    # Set ALL possible environment variables that Windows installers use
+    $envVars = @{
+        "TEMP" = $TempDir
+        "TMP" = $TempDir
+        "LOCALAPPDATA" = "$env:USERPROFILE\AppData\Local"
+        "ProgramData" = "C:\ProgramData"
+        "ALLUSERSPROFILE" = "C:\ProgramData"
+        "WINDIR" = "C:\Windows"
+        "SYSTEMROOT" = "C:\Windows"
     }
     
-    # Create Microsoft\Windows\Setup directory if it doesn't exist (installer expects this)
-    $setupPath = "C:\ProgramData\Microsoft\Windows\Setup"
-    if (-not (Test-Path $setupPath)) {
+    foreach ($var in $envVars.GetEnumerator()) {
+        Set-Item -Path "env:$($var.Key)" -Value $var.Value -Force
+        [Environment]::SetEnvironmentVariable($var.Key, $var.Value, "Process")
+        Write-Log "✅ Set $($var.Key) = $($var.Value)" "SUCCESS"
+    }
+    
+    # Create a completely isolated temp directory for the installer
+    $isolatedTemp = "C:\Windows11Temp"
+    if (-not (Test-Path $isolatedTemp)) {
         try {
-            New-Item -Path $setupPath -ItemType Directory -Force | Out-Null
-            Write-Log "✅ Created Setup directory" "SUCCESS"
+            New-Item -Path $isolatedTemp -ItemType Directory -Force | Out-Null
+            
+            # Set maximum permissions
+            $isolatedAcl = Get-Acl $isolatedTemp
+            $everyoneRule = New-Object System.Security.AccessControl.FileSystemAccessRule("Everyone", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            $isolatedAcl.SetAccessRule($everyoneRule)
+            Set-Acl -Path $isolatedTemp -AclObject $isolatedAcl
+            
+            # Override temp variables to use this directory
+            $env:TEMP = $isolatedTemp
+            $env:TMP = $isolatedTemp
+            [Environment]::SetEnvironmentVariable("TEMP", $isolatedTemp, "Process")
+            [Environment]::SetEnvironmentVariable("TMP", $isolatedTemp, "Process")
+            
+            Write-Log "✅ Created isolated temp directory with maximum permissions: $isolatedTemp" "SUCCESS"
         } catch {
-            Write-Log "⚠️  Could not create Setup directory" "WARNING"
+            Write-Log "⚠️  Could not create isolated temp directory" "WARNING"
         }
     }
     
-    Write-Log "✅ Installation Assistant environment prepared" "SUCCESS"
+    Write-Log "✅ Installation Assistant environment prepared with comprehensive permissions" "SUCCESS"
     
     # Clean up scheduled task if it exists (in case this is the post-restart run)
     try {
@@ -847,15 +896,48 @@ try {
         try {
             Write-Log "▶️  Starting installer process (attempt $retryCount)..." "INFO"
             
-            # Try with different startup methods
+            # Try with different startup methods and escalated privileges
             if ($retryCount -eq 1) {
                 # Standard method
+                Write-Log "Method 1: Standard execution with current privileges" "INFO"
                 $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -WindowStyle Hidden -Wait
             } elseif ($retryCount -eq 2) {
-                # Alternative method - visible window
-                $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -Wait
+                # Alternative method - run as SYSTEM using PsExec-like approach
+                Write-Log "Method 2: Attempting to run as SYSTEM using scheduled task" "INFO"
+                try {
+                    # Create a temporary scheduled task to run as SYSTEM
+                    $taskName = "Windows11UpgradeTemp"
+                    $taskAction = New-ScheduledTaskAction -Execute $Installer -Argument $argumentString
+                    $taskPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+                    $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+                    
+                    Register-ScheduledTask -TaskName $taskName -Action $taskAction -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
+                    Start-ScheduledTask -TaskName $taskName
+                    
+                    # Wait for completion
+                    $timeout = 0
+                    do {
+                        Start-Sleep -Seconds 10
+                        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+                        $timeout += 10
+                    } while ($task.State -eq "Running" -and $timeout -lt 300)
+                    
+                    # Get exit code from task history
+                    $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+                    $process = [PSCustomObject]@{ ExitCode = $taskInfo.LastTaskResult }
+                    
+                    # Clean up task
+                    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+                    
+                    Write-Log "✅ SYSTEM execution completed with code: $($process.ExitCode)" "SUCCESS"
+                } catch {
+                    Write-Log "❌ SYSTEM execution failed: $($_.Exception.Message)" "ERROR"
+                    # Fallback to standard method
+                    $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -Wait
+                }
             } else {
-                # Last resort - minimal arguments
+                # Last resort - minimal arguments with visible window
+                Write-Log "Method 3: Minimal arguments with visible window" "INFO"
                 $simpleArgs = @("/quietinstall", "/auto upgrade")
                 $process = Start-Process -FilePath $Installer -ArgumentList ($simpleArgs -join " ") -PassThru -Wait
             }
