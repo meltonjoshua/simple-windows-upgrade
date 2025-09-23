@@ -84,39 +84,123 @@ function Update-Progress {
 function Test-SystemHealth {
     Write-Log "🏥 Performing comprehensive system health check..." "INFO"
     $issues = @()
+    $warnings = @()
     
-    # Check disk space
+    # Check disk space (more lenient for automatic mode)
     try {
         $disk = Get-WmiObject -Class Win32_LogicalDisk | Where-Object { $_.DeviceID -eq $env:SystemDrive }
         $freeSpaceGB = [math]::Round($disk.FreeSpace / 1GB, 2)
-        if ($freeSpaceGB -lt 32) {
-            $issues += "Insufficient disk space: ${freeSpaceGB}GB (32GB minimum required)"
+        
+        if ($freeSpaceGB -lt 20) {
+            $issues += "Critical: Insufficient disk space: ${freeSpaceGB}GB (20GB absolute minimum)"
+        } elseif ($freeSpaceGB -lt 32) {
+            $warnings += "Low disk space: ${freeSpaceGB}GB (32GB recommended, but proceeding)"
+            Write-Log "⚠️  Low disk space: ${freeSpaceGB}GB (continuing anyway)" "WARNING"
         } else {
             Write-Log "✅ Disk space: ${freeSpaceGB}GB available" "SUCCESS"
         }
     } catch {
-        Write-Log "Could not verify disk space" "WARNING"
+        $warnings += "Could not verify disk space - continuing anyway"
+        Write-Log "Could not verify disk space - continuing anyway" "WARNING"
     }
     
-    # Check for pending reboot
-    $rebootRequired = $false
-    $rebootKeys = @(
-        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired",
-        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
-    )
-    
-    foreach ($key in $rebootKeys) {
-        if (Test-Path $key) {
-            $rebootRequired = $true
-            break
+    # Check for pending reboot (more intelligent detection)
+    try {
+        $rebootRequired = $false
+        $rebootSources = @()
+        
+        # Check multiple reboot indicators
+        $rebootChecks = @(
+            @{ Key = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"; Source = "Windows Update" },
+            @{ Key = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"; Source = "Component Based Servicing" },
+            @{ Key = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"; Value = "PendingFileRenameOperations"; Source = "File Operations" }
+        )
+        
+        foreach ($check in $rebootChecks) {
+            if ($check.Value) {
+                # Check for specific registry value
+                $regValue = Get-ItemProperty -Path $check.Key -Name $check.Value -ErrorAction SilentlyContinue
+                if ($regValue -and $regValue.$($check.Value)) {
+                    $rebootRequired = $true
+                    $rebootSources += $check.Source
+                }
+            } else {
+                # Check for registry key existence
+                if (Test-Path $check.Key) {
+                    $rebootRequired = $true
+                    $rebootSources += $check.Source
+                }
+            }
         }
+        
+        if ($rebootRequired) {
+            $rebootMessage = "Pending reboot detected from: $($rebootSources -join ', ')"
+            
+            # In automatic mode, this is a warning, not a blocking issue
+            if ($AutomaticMode -or $ForceRestart) {
+                $warnings += "$rebootMessage (will be handled automatically)"
+                Write-Log "⚠️  $rebootMessage (automatic restart will be scheduled)" "WARNING"
+            } else {
+                $issues += "$rebootMessage - restart recommended before upgrade"
+            }
+        } else {
+            Write-Log "✅ No pending reboot detected" "SUCCESS"
+        }
+    } catch {
+        $warnings += "Could not check reboot status - continuing anyway"
+        Write-Log "Could not check reboot status - continuing anyway" "WARNING"
     }
     
-    if ($rebootRequired) {
-        $issues += "System reboot is pending - please restart before upgrading"
+    # Check available memory (non-blocking)
+    try {
+        $memory = Get-WmiObject -Class Win32_ComputerSystem
+        $totalMemoryGB = [math]::Round($memory.TotalPhysicalMemory / 1GB, 2)
+        
+        if ($totalMemoryGB -lt 4) {
+            $warnings += "Low system memory: ${totalMemoryGB}GB (4GB+ recommended)"
+            Write-Log "⚠️  Low memory: ${totalMemoryGB}GB (continuing with registry bypasses)" "WARNING"
+        } else {
+            Write-Log "✅ System memory: ${totalMemoryGB}GB" "SUCCESS"
+        }
+    } catch {
+        $warnings += "Could not check system memory"
+        Write-Log "Could not check system memory" "WARNING"
     }
     
-    return @{ Issues = $issues; Healthy = ($issues.Count -eq 0) }
+    # Check system drive health (non-blocking)
+    try {
+        $systemDrive = $env:SystemDrive.Replace(":", "")
+        $driveHealth = Get-WmiObject -Class Win32_LogicalDisk | Where-Object { $_.DeviceID -eq $env:SystemDrive }
+        
+        if ($driveHealth.Size -lt 120GB) {
+            $warnings += "Small system drive: $([math]::Round($driveHealth.Size / 1GB, 0))GB total"
+        }
+        
+        Write-Log "✅ System drive check completed" "SUCCESS"
+    } catch {
+        $warnings += "Could not check drive health"
+        Write-Log "Could not check drive health" "WARNING"
+    }
+    
+    # Summary
+    $healthSummary = @{
+        Issues = $issues
+        Warnings = $warnings
+        Healthy = ($issues.Count -eq 0)
+        CriticalIssues = $issues.Count
+        WarningCount = $warnings.Count
+    }
+    
+    if ($healthSummary.Healthy) {
+        Write-Log "✅ System health check passed" "SUCCESS"
+        if ($warnings.Count -gt 0) {
+            Write-Log "⚠️  $($warnings.Count) warnings noted but not blocking" "WARNING"
+        }
+    } else {
+        Write-Log "❌ $($issues.Count) critical health issues detected" "ERROR"
+    }
+    
+    return $healthSummary
 }
 
 function Update-Windows10ToLatest {
@@ -351,18 +435,34 @@ try {
     Update-Progress "Windows 11 Upgrade" "Performing system health check..." $CurrentStep
     
     $healthCheck = Test-SystemHealth
+    
+    # Display warnings if any
+    if ($healthCheck.Warnings -and $healthCheck.Warnings.Count -gt 0) {
+        Write-Log "⚠️  System health warnings (non-blocking):" "WARNING"
+        foreach ($warning in $healthCheck.Warnings) {
+            Write-Log "  • $warning" "WARNING"
+        }
+    }
+    
+    # Handle critical issues
     if (-not $healthCheck.Healthy -and -not $SkipHealthCheck) {
-        Write-Log "⚠️  System health issues detected (non-critical in automatic mode):" "WARNING"
+        Write-Log "❌ Critical system health issues detected:" "ERROR"
         foreach ($issue in $healthCheck.Issues) {
-            Write-Log "  • $issue" "WARNING"
+            Write-Log "  • $issue" "ERROR"
         }
         
         if ($AutomaticMode) {
-            Write-Log "🤖 Automatic mode: Continuing despite health warnings" "INFO"
+            Write-Log "🤖 Automatic mode: Treating critical issues as warnings" "WARNING"
+            Write-Log "⚠️  Continuing despite critical issues in automatic mode" "WARNING"
         } else {
             Write-Log "❌ Health check failed - use -SkipHealthCheck to override" "ERROR"
+            if (-not $AutomaticMode) {
+                Write-Host "❌ Critical system health issues detected. Use -SkipHealthCheck to bypass." -ForegroundColor Red
+            }
             exit 2
         }
+    } elseif ($healthCheck.Healthy) {
+        Write-Log "✅ System health check passed" "SUCCESS"
     }
     
     # Step 4: Check Windows version and update if needed
@@ -494,6 +594,37 @@ try {
     $CurrentStep++
     Update-Progress "Windows 11 Upgrade" "Starting Windows 11 upgrade..." $CurrentStep
     
+    # Check if Windows 11 Installation Assistant is already running
+    $existingProcess = Get-Process -Name "Windows11InstallationAssistant" -ErrorAction SilentlyContinue
+    if ($existingProcess) {
+        Write-Log "⚠️  Windows 11 Installation Assistant is already running" "WARNING"
+        Write-Log "🔄 Terminating existing instance to prevent conflicts..." "INFO"
+        
+        try {
+            $existingProcess | Stop-Process -Force
+            Start-Sleep -Seconds 3
+            Write-Log "✅ Existing instance terminated" "SUCCESS"
+        } catch {
+            Write-Log "❌ Could not terminate existing instance: $($_.Exception.Message)" "ERROR"
+            Write-Log "🔄 Attempting to continue anyway..." "INFO"
+        }
+    }
+    
+    # Also check for any Windows Update or setup processes that might interfere
+    $interferingProcesses = @("Windows11InstallationAssistant", "SetupHost", "Windows11Upgrade")
+    foreach ($processName in $interferingProcesses) {
+        $processes = Get-Process -Name $processName -ErrorAction SilentlyContinue
+        if ($processes) {
+            Write-Log "🛑 Terminating interfering process: $processName" "INFO"
+            try {
+                $processes | Stop-Process -Force
+                Start-Sleep -Seconds 2
+            } catch {
+                Write-Log "Could not terminate $processName - continuing anyway" "WARNING"
+            }
+        }
+    }
+    
     # Automatic restart arguments for enterprise deployment
     $arguments = if ($AutomaticMode -or $ForceRestart) {
         @("/quietinstall", "/skipeula", "/auto upgrade", "/CopyLogs `"$LogFile`"")  # Allow automatic restart
@@ -512,7 +643,34 @@ try {
         Write-Log "✅ Cleaned up restart continuation task" "SUCCESS"
     } catch { }
     
-    $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -WindowStyle Hidden -Wait
+    # Add retry logic for the installer
+    $maxRetries = 3
+    $retryCount = 0
+    $installerSuccess = $false
+    
+    while ($retryCount -lt $maxRetries -and -not $installerSuccess) {
+        $retryCount++
+        
+        if ($retryCount -gt 1) {
+            Write-Log "🔄 Installer attempt $retryCount of $maxRetries..." "INFO"
+            Start-Sleep -Seconds 10
+        }
+        
+        try {
+            $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -WindowStyle Hidden -Wait
+            $installerSuccess = $true
+        } catch {
+            Write-Log "❌ Installer attempt $retryCount failed: $($_.Exception.Message)" "ERROR"
+            if ($retryCount -lt $maxRetries) {
+                Write-Log "🔄 Retrying in 10 seconds..." "INFO"
+            }
+        }
+    }
+    
+    if (-not $installerSuccess) {
+        Write-Log "❌ Installer failed after $maxRetries attempts" "ERROR"
+        exit 6
+    }
     
     # Step 9: Check results
     $CurrentStep++

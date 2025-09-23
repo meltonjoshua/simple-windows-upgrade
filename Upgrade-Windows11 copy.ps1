@@ -998,22 +998,15 @@ foreach ($source in ($downloadSources | Sort-Object Priority)) {
         Write-Log "Failed to download from $($source.Name), trying next source..." "WARNING"
     }
 }
-            Write-Log "Download failed: File not created" "ERROR"
-        }
-    } catch {
-        $ProgressPreference = 'Continue'
-        Write-Log "Download attempt $downloadAttempts failed: $($_.Exception.Message)" "ERROR"
-        
-        if ($downloadAttempts -lt $maxAttempts) {
-            Write-Log "Waiting 5 seconds before retry..." "INFO"
-            Start-Sleep 5
-        }
-    }
-}
 
 if (-not $downloadSuccess) {
-    Write-Log "Failed to download Windows 11 Installation Assistant after $maxAttempts attempts" "ERROR"
+    Write-Log "❌ Failed to download Windows 11 Installation Assistant from all sources" "ERROR"
+    Write-Log "   Total attempts: $totalAttempts" "ERROR"
     Write-Progress -Activity "Windows 11 Upgrade" -Completed
+    
+    Write-Host "" -ForegroundColor Red
+    Write-Host "❌ Could not download Windows 11 Installation Assistant" -ForegroundColor Red
+    Write-Host "   Please check your internet connection and try again" -ForegroundColor Red
     
     if ($KeepOpen) {
         Write-Host ""
