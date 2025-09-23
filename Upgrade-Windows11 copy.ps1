@@ -642,7 +642,8 @@ $monitoringJob = Start-UpgradeMonitoring -LogPath $LogFile
 $CurrentStep++
 Update-Progress "Windows 11 Upgrade" "Starting Windows 11 upgrade process..." $CurrentStep
 
-# Comprehensive installer arguments with all known bypasses
+# Comprehensive installer arguments with custom temp directory
+$customInstallDir = "C:\Temp\Windows11Install"
 $arguments = @(
     "/quietinstall",           # Silent installation
     "/skipeula",              # Skip EULA
@@ -652,8 +653,36 @@ $arguments = @(
     "/installfromnetwork",    # Install from network (bypass some checks)
     "/noreboot",              # Don't reboot automatically (for testing)
     "/compat IgnoreWarning",  # Ignore compatibility warnings
-    "/compat ScanOnly"        # Initially scan only, then proceed
+    "/compat ScanOnly",       # Initially scan only, then proceed
+    "/TempDrive C:",          # Force temp drive
+    "/DynamicUpdate Disable"  # Disable dynamic updates that might need permissions
 )
+
+# Create custom installation directory with full permissions
+Write-Log "🔧 Creating custom installation directory with full permissions..." "INFO"
+try {
+    if (Test-Path $customInstallDir) {
+        Remove-Item $customInstallDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    New-Item -Path $customInstallDir -ItemType Directory -Force | Out-Null
+    
+    # Set everyone full control on our custom directory
+    $acl = Get-Acl $customInstallDir
+    $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        "Everyone", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"
+    )
+    $acl.SetAccessRule($accessRule)
+    Set-Acl -Path $customInstallDir -AclObject $acl
+    
+    # Set TEMP and TMP environment variables to our directory
+    $env:TEMP = $customInstallDir
+    $env:TMP = $customInstallDir
+    $env:WINDOWS_INSTALL_TEMP = $customInstallDir
+    
+    Write-Log "✅ Custom installation directory created: $customInstallDir" "SUCCESS"
+} catch {
+    Write-Log "Warning: Could not create custom installation directory" "WARNING"
+}
 
 # Join arguments for display
 $argumentString = $arguments -join " "
@@ -735,16 +764,17 @@ try {
 }
 
 try {
-    # Start the installer process with comprehensive bypass arguments and elevated privileges
-    $processStartInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $processStartInfo.FileName = $Installer
-    $processStartInfo.Arguments = $argumentString
-    $processStartInfo.UseShellExecute = $true
-    $processStartInfo.Verb = "runas"  # Force run as administrator
-    $processStartInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    # Copy installer to our custom directory to avoid permission issues
+    $customInstaller = Join-Path $customInstallDir "Windows11InstallationAssistant.exe"
+    Copy-Item -Path $Installer -Destination $customInstaller -Force
+    Write-Log "✅ Copied installer to custom directory" "SUCCESS"
     
-    Write-Log "🚀 Starting installer with elevated privileges..." "INFO"
-    $process = [System.Diagnostics.Process]::Start($processStartInfo)
+    # Change to our custom directory
+    Push-Location $customInstallDir
+    
+    # Start the installer process with comprehensive bypass arguments
+    Write-Log "🚀 Starting installer from custom directory with full permissions..." "INFO"
+    $process = Start-Process -FilePath $customInstaller -ArgumentList $argumentString -PassThru -WorkingDirectory $customInstallDir -ErrorAction Stop
     Write-Log "Installer process started with PID: $($process.Id)" "SUCCESS"
     
     # Monitor the process
@@ -965,6 +995,13 @@ try {
         Stop-Job $monitoringJob -ErrorAction SilentlyContinue
         Remove-Job $monitoringJob -ErrorAction SilentlyContinue
         Write-Log "Background monitoring stopped" "INFO"
+    }
+    
+    # Return to original directory
+    try {
+        Pop-Location -ErrorAction SilentlyContinue
+    } catch {
+        # Ignore errors if Push-Location wasn't called
     }
 }
 
