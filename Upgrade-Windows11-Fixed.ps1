@@ -1,10 +1,11 @@
-# Windows 11 Upgrade Script - Enterprise Perfect Edition
-# Automatically handles Windows 10 updates and Windows 11 upgrade
+# Windows 11 Upgrade Script - Fully Automatic Enterprise Edition
+# Completely hands-off deployment for RMM/enterprise environments
 # Run with: iex (iwr -Uri "https://raw.githubusercontent.com/meltonjoshua/simple-windows-upgrade/main/Upgrade-Windows11-Fixed.ps1" -UseBasicParsing).Content
 
 param(
-    [switch]$KeepOpen,
-    [switch]$NoProgress
+    [switch]$NoProgress,
+    [switch]$ForceRestart,
+    [switch]$SkipHealthCheck
 )
 
 # Configuration
@@ -119,6 +120,8 @@ function Test-SystemHealth {
 }
 
 function Update-Windows10ToLatest {
+    param([switch]$AutoRestart)
+    
     Write-Log "🔄 Checking Windows 10 update status..." "INFO"
     
     try {
@@ -131,37 +134,51 @@ function Update-Windows10ToLatest {
         }
         
         if ($currentBuild -eq 19044) {
-            Write-Log "🚀 Attempting to update Windows 10 to latest build..." "INFO"
+            Write-Log "🚀 Automatically updating Windows 10 to latest build..." "INFO"
             
-            # Use UsoClient
+            # Use UsoClient for automatic updates
             try {
+                Write-Log "Initiating automatic Windows Update..." "INFO"
                 Start-Process "UsoClient.exe" -ArgumentList "StartScan" -Wait -WindowStyle Hidden
-                Start-Sleep -Seconds 5
+                Start-Sleep -Seconds 10
                 Start-Process "UsoClient.exe" -ArgumentList "StartDownload" -Wait -WindowStyle Hidden
-                Start-Sleep -Seconds 5
+                Start-Sleep -Seconds 10
                 Start-Process "UsoClient.exe" -ArgumentList "StartInstall" -Wait -WindowStyle Hidden
+                
                 Write-Log "✅ Windows Update initiated successfully" "SUCCESS"
-                Write-Log "⚠️  System restart may be required" "WARNING"
-                return $false # Indicate restart may be needed
+                
+                # If ForceRestart is enabled, schedule automatic restart
+                if ($AutoRestart -or $ForceRestart) {
+                    Write-Log "🔄 Scheduling automatic restart in 60 seconds..." "INFO"
+                    Start-Process "shutdown.exe" -ArgumentList "/r", "/t", "60", "/c", "Windows 10 update requires restart for Windows 11 upgrade" -WindowStyle Hidden
+                    Write-Log "System will restart automatically and continue Windows 11 upgrade" "INFO"
+                    return $false
+                } else {
+                    Write-Log "⚠️  Restart recommended but not forced - continuing upgrade attempt" "WARNING"
+                    return $true # Try to continue anyway
+                }
             } catch {
-                Write-Log "Windows Update failed: $($_.Exception.Message)" "WARNING"
+                Write-Log "Windows Update method failed, continuing with current build: $($_.Exception.Message)" "WARNING"
                 return $true # Continue anyway
             }
         }
         
         return $true
     } catch {
-        Write-Log "Failed to check Windows version: $($_.Exception.Message)" "WARNING"
+        Write-Log "Failed to check Windows version, continuing: $($_.Exception.Message)" "WARNING"
         return $true
     }
 }
 
-# Detect if running from one-liner
-$IsInteractive = [Environment]::UserInteractive -and ![Console]::IsOutputRedirected
-$RunningFromOneLiner = $MyInvocation.Line -match "iex.*iwr|Invoke-Expression.*Invoke-WebRequest"
+# Detect execution environment - fully automatic for enterprise deployment
+$IsRMM = $env:RMM_DEPLOYMENT -eq "true" -or $MyInvocation.Line -match "iex.*iwr|Invoke-Expression.*Invoke-WebRequest"
+$AutomaticMode = $IsRMM -or $env:AUTOMATIC_MODE -eq "true"
 
-if ($IsInteractive -and -not $RunningFromOneLiner) {
-    $KeepOpen = $true
+# Force automatic mode for enterprise environments
+if ($AutomaticMode) {
+    $NoProgress = $false  # Keep progress for RMM visibility
+    $ForceRestart = $true # Enable automatic restarts
+    Write-Log "🤖 Running in fully automatic enterprise mode" "INFO"
 }
 
 # Main execution
@@ -186,9 +203,22 @@ try {
     $IsAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     
     if (-not $IsAdmin) {
-        Write-Log "❌ Administrator privileges required" "ERROR"
-        Write-Host "❌ This script requires Administrator privileges." -ForegroundColor Red
-        Write-Host "Please run PowerShell as Administrator and try again." -ForegroundColor Yellow
+        Write-Log "❌ Administrator privileges required - attempting automatic elevation" "ERROR"
+        
+        # Attempt automatic elevation for enterprise deployment
+        try {
+            if ($AutomaticMode) {
+                Write-Log "🚀 Attempting automatic UAC elevation..." "INFO"
+                $arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"& {$($MyInvocation.MyCommand.Definition)}`""
+                Start-Process PowerShell.exe -Argument $arguments -Verb RunAs -Wait
+                Write-Log "✅ Script re-launched with elevated privileges" "SUCCESS"
+                exit 0
+            }
+        } catch {
+            Write-Log "❌ Automatic elevation failed: $($_.Exception.Message)" "ERROR"
+        }
+        
+        Write-Log "❌ Cannot proceed without Administrator privileges" "ERROR"
         exit 1
     }
     
@@ -199,13 +229,18 @@ try {
     Update-Progress "Windows 11 Upgrade" "Performing system health check..." $CurrentStep
     
     $healthCheck = Test-SystemHealth
-    if (-not $healthCheck.Healthy) {
-        Write-Log "❌ System health issues detected:" "ERROR"
+    if (-not $healthCheck.Healthy -and -not $SkipHealthCheck) {
+        Write-Log "⚠️  System health issues detected (non-critical in automatic mode):" "WARNING"
         foreach ($issue in $healthCheck.Issues) {
-            Write-Log "  • $issue" "ERROR"
+            Write-Log "  • $issue" "WARNING"
         }
-        Write-Host "❌ Please resolve health issues before upgrading." -ForegroundColor Red
-        exit 2
+        
+        if ($AutomaticMode) {
+            Write-Log "🤖 Automatic mode: Continuing despite health warnings" "INFO"
+        } else {
+            Write-Log "❌ Health check failed - use -SkipHealthCheck to override" "ERROR"
+            exit 2
+        }
     }
     
     # Step 4: Check Windows version and update if needed
@@ -218,19 +253,35 @@ try {
     
     if ($currentBuild -ge 22000) {
         Write-Log "✅ Already running Windows 11 (Build $currentBuild)" "SUCCESS"
-        Write-Host "✅ System is already running Windows 11!" -ForegroundColor Green
+        if (-not $AutomaticMode) {
+            Write-Host "✅ System is already running Windows 11!" -ForegroundColor Green
+        }
         exit 0
     }
     
     if ($currentBuild -eq 19044) {
-        Write-Log "🔄 Windows 10 Build 19044 detected - updating first..." "INFO"
-        $updateResult = Update-Windows10ToLatest
+        Write-Log "🔄 Windows 10 Build 19044 detected - automatic update required..." "INFO"
+        $updateResult = Update-Windows10ToLatest -AutoRestart:$ForceRestart
         
-        if (-not $updateResult) {
-            Write-Log "⚠️  Windows 10 update initiated - restart required" "WARNING"
-            Write-Host "⚠️  Windows 10 has been updated but requires a restart." -ForegroundColor Yellow
-            Write-Host "Please restart your computer and re-run this script." -ForegroundColor Yellow
+        if (-not $updateResult -and $ForceRestart) {
+            Write-Log "🔄 System restart scheduled - Windows 11 upgrade will continue after restart" "INFO"
+            
+            # Create scheduled task to continue upgrade after restart
+            $taskAction = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"iex (iwr -Uri 'https://raw.githubusercontent.com/meltonjoshua/simple-windows-upgrade/main/Upgrade-Windows11-Fixed.ps1' -UseBasicParsing).Content`""
+            $taskTrigger = New-ScheduledTaskTrigger -AtStartup
+            $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+            $taskPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+            
+            try {
+                Register-ScheduledTask -TaskName "ContinueWindows11Upgrade" -Action $taskAction -Trigger $taskTrigger -Settings $taskSettings -Principal $taskPrincipal -Force
+                Write-Log "✅ Scheduled task created to continue upgrade after restart" "SUCCESS"
+            } catch {
+                Write-Log "⚠️  Could not create scheduled task: $($_.Exception.Message)" "WARNING"
+            }
+            
             exit 3
+        } elseif (-not $updateResult) {
+            Write-Log "⚠️  Windows 10 update recommended but continuing with current build" "WARNING"
         }
     }
     
@@ -300,7 +351,9 @@ try {
     
     if (-not $downloadSuccess) {
         Write-Log "❌ Failed to download installer after $maxAttempts attempts" "ERROR"
-        Write-Host "❌ Could not download Windows 11 Installation Assistant" -ForegroundColor Red
+        if (-not $AutomaticMode) {
+            Write-Host "❌ Could not download Windows 11 Installation Assistant" -ForegroundColor Red
+        }
         exit 4
     }
     
@@ -315,16 +368,27 @@ try {
     
     Write-Log "✅ Installer verification successful!" "SUCCESS"
     
-    # Step 8: Run installer
+    # Step 8: Run installer with automatic restart
     $CurrentStep++
     Update-Progress "Windows 11 Upgrade" "Starting Windows 11 upgrade..." $CurrentStep
     
-    $arguments = @("/quietinstall", "/skipeula", "/auto upgrade", "/CopyLogs `"$LogFile`"", "/noreboot")
+    # Automatic restart arguments for enterprise deployment
+    $arguments = if ($AutomaticMode -or $ForceRestart) {
+        @("/quietinstall", "/skipeula", "/auto upgrade", "/CopyLogs `"$LogFile`"")  # Allow automatic restart
+    } else {
+        @("/quietinstall", "/skipeula", "/auto upgrade", "/CopyLogs `"$LogFile`"", "/noreboot")  # No auto restart
+    }
+    
     $argumentString = $arguments -join " "
     
     Write-Log "🚀 Running installer with arguments: $argumentString" "INFO"
-    Write-Log "⚠️  The upgrade process will now begin and may take 30-90 minutes." "WARNING"
-    Write-Log "   Your computer will restart automatically when complete." "WARNING"
+    Write-Log "🤖 Automatic mode: System will restart automatically when upgrade completes" "INFO"
+    
+    # Clean up scheduled task if it exists (in case this is the post-restart run)
+    try {
+        Unregister-ScheduledTask -TaskName "ContinueWindows11Upgrade" -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Log "✅ Cleaned up restart continuation task" "SUCCESS"
+    } catch { }
     
     $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -WindowStyle Hidden -Wait
     
@@ -337,17 +401,23 @@ try {
     
     if ($exitCode -eq 0) {
         Write-Log "🎉 Windows 11 upgrade completed successfully!" "SUCCESS"
-        Write-Host "🎉 Windows 11 upgrade completed successfully!" -ForegroundColor Green
+        if (-not $AutomaticMode) {
+            Write-Host "🎉 Windows 11 upgrade completed successfully!" -ForegroundColor Green
+        }
     } else {
         Write-Log "❌ Upgrade completed with exit code: $exitCode" "WARNING"
-        Write-Host "⚠️  Upgrade completed with warnings. Check log for details." -ForegroundColor Yellow
+        if (-not $AutomaticMode) {
+            Write-Host "⚠️  Upgrade completed with warnings. Check log for details." -ForegroundColor Yellow
+        }
     }
     
     Write-Progress -Activity "Windows 11 Upgrade" -Completed
     
 } catch {
     Write-Log "❌ Critical error: $($_.Exception.Message)" "ERROR"
-    Write-Host "❌ Script execution failed: $($_.Exception.Message)" -ForegroundColor Red
+    if (-not $AutomaticMode) {
+        Write-Host "❌ Script execution failed: $($_.Exception.Message)" -ForegroundColor Red
+    }
     exit 99
 } finally {
     # Cleanup
@@ -364,7 +434,8 @@ try {
     
     Write-Log "Windows 11 Upgrade script completed at $(Get-Date -Format 'MM/dd/yyyy HH:mm:ss')" "INFO"
     
-    if ($KeepOpen) {
+    # No user interaction prompts in automatic mode
+    if (-not $AutomaticMode) {
         Write-Host ""
         Write-Host "Press any key to close this window..." -ForegroundColor Yellow
         try {
@@ -372,5 +443,7 @@ try {
         } catch {
             Start-Sleep 2
         }
+    } else {
+        Write-Log "🤖 Automatic mode: Script completed without user interaction" "INFO"
     }
 }
