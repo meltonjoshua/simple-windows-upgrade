@@ -852,6 +852,16 @@ try {
                 } elseif ($currentBuild -eq 19045) {
                     Write-Log "🔍 DIAGNOSIS: Windows 10 22H2 (Build 19045) - should be upgradeable" "INFO"
                     Write-Log "   Quick exit suggests hardware compatibility issue despite bypass" "WARNING"
+                } elseif ($currentBuild -eq 19044) {
+                    Write-Log "🔍 DIAGNOSIS: Windows 10 21H2 (Build 19044) - NEEDS UPDATE FIRST" "WARNING"
+                    Write-Log "   ❌ This build is too old for direct Windows 11 upgrade" "WARNING"
+                    Write-Log "   🔧 SOLUTION: Update to Windows 10 22H2 (Build 19045) first:" "INFO"
+                    Write-Log "      1. Go to Settings > Update & Security > Windows Update" "INFO"
+                    Write-Log "      2. Click 'Check for updates' and install all available updates" "INFO"
+                    Write-Log "      3. Restart when prompted, then repeat until no more updates" "INFO"
+                    Write-Log "      4. Once on Build 19045, re-run this Windows 11 upgrade script" "INFO"
+                    Write-Log "   📋 Alternative: Download Windows 10 Update Assistant from Microsoft" "INFO"
+                    Write-Log "   🤖 AUTOMATIC OPTION: Run 'sconfig' command and select option 6 for Windows Update" "INFO"
                 } else {
                     Write-Log "🔍 DIAGNOSIS: Windows 10 Build $currentBuild - checking compatibility" "INFO"
                 }
