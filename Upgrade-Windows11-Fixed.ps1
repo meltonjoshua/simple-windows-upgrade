@@ -42,30 +42,40 @@ function Update-Progress {
     if (-not $NoProgress) {
         $PercentComplete = ($Step / $TotalSteps) * 100
         $currentTime = Get-Date
-        $elapsed = $currentTime - $script:StartTime
         
-        if ($script:StepTimes.Count -gt 0) {
-            $avgStepTime = ($script:StepTimes | Measure-Object -Average).Average
-            $remainingSteps = $TotalSteps - $Step
-            $etaSeconds = $remainingSteps * $avgStepTime
-            $eta = [TimeSpan]::FromSeconds($etaSeconds)
-            $etaString = if ($eta.TotalMinutes -lt 60) { "{0:mm}m {0:ss}s" -f $eta } else { "{0:hh}h {0:mm}m" -f $eta }
-        } else {
-            $etaString = "Calculating..."
-        }
-        
-        $progressStatus = "$Status"
-        if ($SubStatus) { $progressStatus += " - $SubStatus" }
-        $progressStatus += " (ETA: $etaString)"
-        
-        Write-Progress -Activity $Activity -Status $progressStatus -PercentComplete $PercentComplete
-        
-        $timeStamp = $currentTime.ToString("HH:mm:ss")
-        $elapsedString = "{0:mm}m {0:ss}s" -f $elapsed
-        Write-Host "[$Step/$TotalSteps] [$timeStamp] [$elapsedString] $Status" -ForegroundColor Cyan
-        
-        if ($SubStatus) {
-            Write-Host "    └─ $SubStatus" -ForegroundColor Gray
+        try {
+            $elapsed = $currentTime - $script:StartTime
+            
+            if ($script:StepTimes.Count -gt 0) {
+                $avgStepTime = ($script:StepTimes | Measure-Object -Average).Average
+                $remainingSteps = $TotalSteps - $Step
+                $etaSeconds = $remainingSteps * $avgStepTime
+                $eta = [TimeSpan]::FromSeconds($etaSeconds)
+                $etaString = if ($eta.TotalMinutes -lt 60) { "{0:mm}m {0:ss}s" -f $eta } else { "{0:hh}h {0:mm}m" -f $eta }
+            } else {
+                $etaString = "Calculating..."
+            }
+            
+            $progressStatus = "$Status"
+            if ($SubStatus) { $progressStatus += " - $SubStatus" }
+            $progressStatus += " (ETA: $etaString)"
+            
+            Write-Progress -Activity $Activity -Status $progressStatus -PercentComplete $PercentComplete
+            
+            $timeStamp = $currentTime.ToString("HH:mm:ss")
+            $elapsedString = "{0:mm}m {0:ss}s" -f $elapsed
+            Write-Host "[$Step/$TotalSteps] [$timeStamp] [$elapsedString] $Status" -ForegroundColor Cyan
+            
+            if ($SubStatus) {
+                Write-Host "    └─ $SubStatus" -ForegroundColor Gray
+            }
+        } catch {
+            # Fallback if date calculations fail
+            Write-Progress -Activity $Activity -Status $Status -PercentComplete $PercentComplete
+            Write-Host "[$Step/$TotalSteps] $Status" -ForegroundColor Cyan
+            if ($SubStatus) {
+                Write-Host "    └─ $SubStatus" -ForegroundColor Gray
+            }
         }
     }
 }
@@ -342,8 +352,17 @@ try {
 } finally {
     # Cleanup
     Write-Log "=== UPGRADE SUMMARY ===" "INFO"
-    Write-Log "Total duration: $([math]::Round((Get-Date - $script:StartTime).TotalMinutes, 1)) minutes" "INFO"
-    Write-Log "Windows 11 Upgrade script completed at $(Get-Date)" "INFO"
+    
+    # Safe duration calculation
+    try {
+        $duration = (Get-Date) - $script:StartTime
+        $durationMinutes = [math]::Round($duration.TotalMinutes, 1)
+        Write-Log "Total duration: $durationMinutes minutes" "INFO"
+    } catch {
+        Write-Log "Total duration: Calculation error" "INFO"
+    }
+    
+    Write-Log "Windows 11 Upgrade script completed at $(Get-Date -Format 'MM/dd/yyyy HH:mm:ss')" "INFO"
     
     if ($KeepOpen) {
         Write-Host ""
