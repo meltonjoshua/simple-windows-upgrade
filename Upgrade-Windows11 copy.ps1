@@ -18,6 +18,10 @@ $Installer   = Join-Path $TempDir "Windows11InstallationAssistant.exe"
 $LogFile     = Join-Path $TempDir "upgrade.log"
 $DownloadUrl = "https://go.microsoft.com/fwlink/?linkid=2171764"
 
+# Alternative approach: ISO direct upgrade
+$IsoUrl = "https://go.microsoft.com/fwlink/?linkid=2156292"  # Windows 11 ISO
+$IsoFile = Join-Path $TempDir "Win11.iso"
+
 # Progress tracking
 $TotalSteps = 8
 $CurrentStep = 0
@@ -386,6 +390,23 @@ try {
     }
 
     Write-Host "✅ Running with Administrator privileges" -ForegroundColor Green
+
+    # Temporarily disable UAC to prevent permission issues
+    Write-Log "🔧 Temporarily disabling UAC for installation..." "INFO"
+    try {
+        $originalUAC = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -ErrorAction SilentlyContinue
+        if ($originalUAC) {
+            Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Value 0 -Force
+            Write-Log "✅ UAC temporarily disabled (will be restored after installation)" "SUCCESS"
+            
+            # Also disable consent prompts
+            Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorAdmin" -Value 0 -Force -ErrorAction SilentlyContinue
+            Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorUser" -Value 0 -Force -ErrorAction SilentlyContinue
+            Write-Log "✅ UAC consent prompts disabled" "SUCCESS"
+        }
+    } catch {
+        Write-Log "Warning: Could not modify UAC settings" "WARNING"
+    }
 
     # Create temp directory with error handling
     Invoke-SafeOperation -Operation "Temp Directory Creation" -ScriptBlock {
@@ -1158,6 +1179,18 @@ if (Test-Path $LogFile) {
     try {
         Write-Log "" "INFO"
         Write-Log "=== FINAL CLEANUP ===" "INFO"
+        
+        # Restore UAC settings
+        try {
+            if ($originalUAC) {
+                Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Value $originalUAC.EnableLUA -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorAdmin" -Value 2 -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "ConsentPromptBehaviorUser" -Value 3 -Force -ErrorAction SilentlyContinue
+                Write-Log "✅ UAC settings restored" "SUCCESS"
+            }
+        } catch {
+            Write-Log "Warning: Could not restore UAC settings - please check manually" "WARNING"
+        }
         
         # Log final statistics
         Write-Log "Script completed with exit code: $script:ExitCode" "INFO"
