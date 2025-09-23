@@ -716,7 +716,7 @@ try {
     
     # Start the installer process with comprehensive bypass arguments
     Write-Log "🚀 Starting installer from custom directory with full permissions..." "INFO"
-    $process = Start-Process -FilePath $customInstaller -ArgumentList $argumentString -PassThru -WorkingDirectory $customInstallDir -ErrorAction Stop
+    $process = Start-Process -FilePath $customInstaller -ArgumentList $argumentString -PassThru -WorkingDirectory $customInstallDir -WindowStyle Hidden -ErrorAction Stop
     Write-Log "Installer process started with PID: $($process.Id)" "SUCCESS"
     
     # Monitor the process
