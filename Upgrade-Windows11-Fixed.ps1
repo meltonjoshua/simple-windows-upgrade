@@ -540,9 +540,56 @@ try {
     $CurrentStep++
     Update-Progress "Windows 11 Upgrade" "Downloading Windows 11 Installation Assistant..." $CurrentStep
     
-    if (Test-Path $Installer) {
-        Remove-Item $Installer -Force
+    # Ensure proper temp directory with full permissions
+    $TempDir = "C:\Temp"
+    $Installer = "$TempDir\Windows11InstallationAssistant.exe"
+    
+    # Create temp directory with proper permissions
+    if (-not (Test-Path $TempDir)) {
+        try {
+            New-Item -Path $TempDir -ItemType Directory -Force | Out-Null
+            Write-Log "✅ Created temp directory: $TempDir" "SUCCESS"
+        } catch {
+            Write-Log "❌ Failed to create temp directory: $($_.Exception.Message)" "ERROR"
+            # Fallback to user temp
+            $TempDir = $env:TEMP
+            $Installer = "$TempDir\Windows11InstallationAssistant.exe"
+            Write-Log "🔄 Using fallback temp directory: $TempDir" "INFO"
+        }
     }
+    
+    # Set full permissions on temp directory for current user and SYSTEM
+    try {
+        $acl = Get-Acl $TempDir
+        $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule($env:USERNAME, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+        $acl.SetAccessRule($accessRule)
+        
+        # Also add SYSTEM permissions
+        $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule("SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+        $acl.SetAccessRule($systemRule)
+        
+        Set-Acl -Path $TempDir -AclObject $acl
+        Write-Log "✅ Set full permissions on temp directory" "SUCCESS"
+    } catch {
+        Write-Log "⚠️  Could not set permissions on temp directory: $($_.Exception.Message)" "WARNING"
+    }
+    
+    # Remove existing installer if present
+    if (Test-Path $Installer) {
+        try {
+            Remove-Item $Installer -Force
+            Write-Log "✅ Removed existing installer" "SUCCESS"
+        } catch {
+            Write-Log "⚠️  Could not remove existing installer: $($_.Exception.Message)" "WARNING"
+        }
+    }
+    
+    # Set Windows Installation Assistant temp directory environment variable
+    $env:TEMP = $TempDir
+    $env:TMP = $TempDir
+    [Environment]::SetEnvironmentVariable("TEMP", $TempDir, "Process")
+    [Environment]::SetEnvironmentVariable("TMP", $TempDir, "Process")
+    Write-Log "✅ Set installer temp environment to: $TempDir" "SUCCESS"
     
     $downloadSuccess = $false
     $attempts = 0
@@ -553,13 +600,23 @@ try {
         Write-Log "Download attempt $attempts of $maxAttempts..." "INFO"
         
         try {
-            Invoke-WebRequest -Uri $DownloadUrl -OutFile $Installer -UseBasicParsing -TimeoutSec 300
+            # Download with explicit temp directory
+            $webClient = New-Object System.Net.WebClient
+            $webClient.DownloadFile($DownloadUrl, $Installer)
             
             if (Test-Path $Installer) {
                 $FileSize = (Get-Item $Installer).Length
                 if ($FileSize -gt 1MB) {
-                    $downloadSuccess = $true
-                    Write-Log "✅ Downloaded successfully! File size: $([math]::Round($FileSize / 1MB, 2)) MB" "SUCCESS"
+                    # Verify we can write to the file (test permissions)
+                    try {
+                        [System.IO.File]::OpenWrite($Installer).Close()
+                        $downloadSuccess = $true
+                        Write-Log "✅ Downloaded successfully! File size: $([math]::Round($FileSize / 1MB, 2)) MB" "SUCCESS"
+                        Write-Log "✅ Verified write permissions on installer file" "SUCCESS"
+                    } catch {
+                        Write-Log "❌ Download succeeded but cannot write to file: $($_.Exception.Message)" "ERROR"
+                        Remove-Item $Installer -Force -ErrorAction SilentlyContinue
+                    }
                 } else {
                     Write-Log "❌ Download failed: File too small" "ERROR"
                     Remove-Item $Installer -Force -ErrorAction SilentlyContinue
@@ -567,7 +624,24 @@ try {
             }
         } catch {
             Write-Log "❌ Download failed: $($_.Exception.Message)" "ERROR"
-            Start-Sleep 5
+            
+            # Try alternative download method
+            if ($attempts -eq 2) {
+                Write-Log "🔄 Trying alternative download method..." "INFO"
+                try {
+                    Invoke-WebRequest -Uri $DownloadUrl -OutFile $Installer -UseBasicParsing -TimeoutSec 300
+                    if (Test-Path $Installer -and (Get-Item $Installer).Length -gt 1MB) {
+                        $downloadSuccess = $true
+                        Write-Log "✅ Alternative download method succeeded" "SUCCESS"
+                    }
+                } catch {
+                    Write-Log "❌ Alternative download also failed: $($_.Exception.Message)" "ERROR"
+                }
+            }
+            
+            if (-not $downloadSuccess) {
+                Start-Sleep 5
+            }
         }
     }
     
@@ -678,6 +752,50 @@ try {
     
     Write-Log "🚀 Running installer with arguments: $argumentString" "INFO"
     Write-Log "🤖 Automatic mode: System will restart automatically when upgrade completes" "INFO"
+    
+    # Additional permission and environment setup for Installation Assistant
+    Write-Log "🔧 Preparing Installation Assistant environment..." "INFO"
+    
+    # Create Windows.old backup directory with proper permissions (installer expects this)
+    $windowsOldPath = "C:\Windows.old"
+    if (-not (Test-Path $windowsOldPath)) {
+        try {
+            New-Item -Path $windowsOldPath -ItemType Directory -Force | Out-Null
+            Write-Log "✅ Created Windows.old directory" "SUCCESS"
+        } catch {
+            Write-Log "⚠️  Could not create Windows.old directory" "WARNING"
+        }
+    }
+    
+    # Set additional environment variables that Installation Assistant uses
+    $env:LOCALAPPDATA = "$env:USERPROFILE\AppData\Local"
+    $env:ProgramData = "C:\ProgramData"
+    [Environment]::SetEnvironmentVariable("LOCALAPPDATA", $env:LOCALAPPDATA, "Process")
+    [Environment]::SetEnvironmentVariable("ProgramData", $env:ProgramData, "Process")
+    
+    # Ensure ProgramData has proper permissions
+    try {
+        $programDataAcl = Get-Acl "C:\ProgramData"
+        $fullControlRule = New-Object System.Security.AccessControl.FileSystemAccessRule($env:USERNAME, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+        $programDataAcl.SetAccessRule($fullControlRule)
+        Set-Acl -Path "C:\ProgramData" -AclObject $programDataAcl -ErrorAction SilentlyContinue
+        Write-Log "✅ Ensured ProgramData permissions" "SUCCESS"
+    } catch {
+        Write-Log "⚠️  Could not set ProgramData permissions" "WARNING"
+    }
+    
+    # Create Microsoft\Windows\Setup directory if it doesn't exist (installer expects this)
+    $setupPath = "C:\ProgramData\Microsoft\Windows\Setup"
+    if (-not (Test-Path $setupPath)) {
+        try {
+            New-Item -Path $setupPath -ItemType Directory -Force | Out-Null
+            Write-Log "✅ Created Setup directory" "SUCCESS"
+        } catch {
+            Write-Log "⚠️  Could not create Setup directory" "WARNING"
+        }
+    }
+    
+    Write-Log "✅ Installation Assistant environment prepared" "SUCCESS"
     
     # Clean up scheduled task if it exists (in case this is the post-restart run)
     try {
