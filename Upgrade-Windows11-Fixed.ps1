@@ -134,38 +134,160 @@ function Update-Windows10ToLatest {
         }
         
         if ($currentBuild -eq 19044) {
-            Write-Log "🚀 Automatically updating Windows 10 to latest build..." "INFO"
+            Write-Log "🚀 Forcing immediate Windows 10 update to Build 19045..." "INFO"
             
-            # Use UsoClient for automatic updates
+            # Method 1: Aggressive UsoClient approach
             try {
-                Write-Log "Initiating automatic Windows Update..." "INFO"
-                Start-Process "UsoClient.exe" -ArgumentList "StartScan" -Wait -WindowStyle Hidden
-                Start-Sleep -Seconds 10
+                Write-Log "Method 1: Using UsoClient for immediate update..." "INFO"
+                
+                # Reset Windows Update components first
+                Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
+                Stop-Service BITS -Force -ErrorAction SilentlyContinue
+                Stop-Service cryptsvc -Force -ErrorAction SilentlyContinue
+                
+                Start-Service wuauserv -ErrorAction SilentlyContinue
+                Start-Service BITS -ErrorAction SilentlyContinue  
+                Start-Service cryptsvc -ErrorAction SilentlyContinue
+                
+                # Force immediate scan and install
+                Start-Process "UsoClient.exe" -ArgumentList "ScanInstallWait" -Wait -WindowStyle Hidden
+                Start-Sleep -Seconds 15
                 Start-Process "UsoClient.exe" -ArgumentList "StartDownload" -Wait -WindowStyle Hidden
                 Start-Sleep -Seconds 10
                 Start-Process "UsoClient.exe" -ArgumentList "StartInstall" -Wait -WindowStyle Hidden
+                Start-Sleep -Seconds 5
                 
-                Write-Log "✅ Windows Update initiated successfully" "SUCCESS"
+                Write-Log "✅ UsoClient update commands executed" "SUCCESS"
+            } catch {
+                Write-Log "UsoClient method failed: $($_.Exception.Message)" "WARNING"
+            }
+            
+            # Method 2: Direct Windows Update API
+            try {
+                Write-Log "Method 2: Using Windows Update API..." "INFO"
                 
-                # If ForceRestart is enabled, schedule automatic restart
-                if ($AutoRestart -or $ForceRestart) {
-                    Write-Log "🔄 Scheduling automatic restart in 60 seconds..." "INFO"
-                    Start-Process "shutdown.exe" -ArgumentList "/r", "/t", "60", "/c", "Windows 10 update requires restart for Windows 11 upgrade" -WindowStyle Hidden
-                    Write-Log "System will restart automatically and continue Windows 11 upgrade" "INFO"
-                    return $false
+                $updateSession = New-Object -ComObject Microsoft.Update.Session
+                $updateSearcher = $updateSession.CreateUpdateSearcher()
+                $updateSearcher.Online = $true
+                
+                Write-Log "Searching for available updates..." "INFO"
+                $searchResult = $updateSearcher.Search("IsInstalled=0 and Type='Software' and IsHidden=0")
+                
+                if ($searchResult.Updates.Count -gt 0) {
+                    Write-Log "Found $($searchResult.Updates.Count) available updates" "SUCCESS"
+                    
+                    # Focus on feature updates and cumulative updates
+                    $criticalUpdates = New-Object -ComObject Microsoft.Update.UpdateColl
+                    foreach ($update in $searchResult.Updates) {
+                        if ($update.Title -like "*Feature update*" -or $update.Title -like "*Cumulative*" -or $update.Title -like "*Quality*") {
+                            $criticalUpdates.Add($update) | Out-Null
+                            Write-Log "Queued: $($update.Title)" "INFO"
+                        }
+                    }
+                    
+                    if ($criticalUpdates.Count -gt 0) {
+                        Write-Log "Downloading $($criticalUpdates.Count) critical updates..." "INFO"
+                        
+                        $downloader = $updateSession.CreateUpdateDownloader()
+                        $downloader.Updates = $criticalUpdates
+                        $downloadResult = $downloader.Download()
+                        
+                        if ($downloadResult.ResultCode -eq 2) {
+                            Write-Log "Installing updates..." "INFO"
+                            
+                            $installer = $updateSession.CreateUpdateInstaller()
+                            $installer.Updates = $criticalUpdates
+                            $installResult = $installer.Install()
+                            
+                            if ($installResult.ResultCode -eq 2) {
+                                Write-Log "✅ Updates installed successfully" "SUCCESS"
+                            } else {
+                                Write-Log "Update installation result: $($installResult.ResultCode)" "WARNING"
+                            }
+                        }
+                    }
                 } else {
-                    Write-Log "⚠️  Restart recommended but not forced - continuing upgrade attempt" "WARNING"
-                    return $true # Try to continue anyway
+                    Write-Log "No updates found via Windows Update API" "INFO"
                 }
             } catch {
-                Write-Log "Windows Update method failed, continuing with current build: $($_.Exception.Message)" "WARNING"
-                return $true # Continue anyway
+                Write-Log "Windows Update API method failed: $($_.Exception.Message)" "WARNING"
+            }
+            
+            # Method 3: PowerShell Get-WindowsUpdate (if available)
+            try {
+                Write-Log "Method 3: Checking for PowerShell Windows Update module..." "INFO"
+                
+                # Try to install/use PSWindowsUpdate module
+                if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
+                    Write-Log "Installing PSWindowsUpdate module..." "INFO"
+                    Install-PackageProvider -Name NuGet -Force -Scope CurrentUser -ErrorAction SilentlyContinue
+                    Install-Module -Name PSWindowsUpdate -Force -Scope CurrentUser -ErrorAction SilentlyContinue
+                }
+                
+                if (Get-Module -ListAvailable -Name PSWindowsUpdate) {
+                    Import-Module PSWindowsUpdate -Force
+                    $updates = Get-WUList -MicrosoftUpdate
+                    if ($updates) {
+                        Write-Log "Found $($updates.Count) updates via PSWindowsUpdate" "SUCCESS"
+                        Install-WindowsUpdate -MicrosoftUpdate -AcceptAll -IgnoreReboot
+                        Write-Log "Updates initiated via PSWindowsUpdate" "SUCCESS"
+                    }
+                }
+            } catch {
+                Write-Log "PSWindowsUpdate method failed: $($_.Exception.Message)" "WARNING"
+            }
+            
+            # Method 4: Manual registry trigger
+            try {
+                Write-Log "Method 4: Triggering Windows Update via registry..." "INFO"
+                
+                # Force Windows Update detection
+                $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update"
+                Set-ItemProperty -Path $regPath -Name "AUOptions" -Value 4 -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $regPath -Name "ScheduledInstallDay" -Value 0 -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $regPath -Name "ScheduledInstallTime" -Value 3 -Force -ErrorAction SilentlyContinue
+                
+                # Restart Windows Update service
+                Restart-Service wuauserv -Force -ErrorAction SilentlyContinue
+                
+                Write-Log "Registry triggers applied" "SUCCESS"
+            } catch {
+                Write-Log "Registry method failed: $($_.Exception.Message)" "WARNING"
+            }
+            
+            Write-Log "🔄 All update methods attempted - checking if restart is needed..." "INFO"
+            
+            # Check if restart is pending after update attempts
+            $rebootRequired = $false
+            $rebootKeys = @(
+                "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired",
+                "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+            )
+            
+            foreach ($key in $rebootKeys) {
+                if (Test-Path $key) {
+                    $rebootRequired = $true
+                    break
+                }
+            }
+            
+            if ($rebootRequired -and ($AutoRestart -or $ForceRestart)) {
+                Write-Log "🔄 Updates require restart - scheduling automatic restart..." "INFO"
+                Start-Process "shutdown.exe" -ArgumentList "/r", "/t", "120", "/c", "Windows 10 update completed - restarting for Windows 11 upgrade" -WindowStyle Hidden
+                return $false
+            } elseif ($rebootRequired) {
+                Write-Log "⚠️  Updates require restart but automatic restart is disabled" "WARNING"
+                return $false
+            } else {
+                Write-Log "⚠️  No immediate restart required - attempting to continue with Windows 11 upgrade" "WARNING"
+                return $true
             }
         }
         
         return $true
     } catch {
-        Write-Log "Failed to check Windows version, continuing: $($_.Exception.Message)" "WARNING"
+        Write-Log "Failed to update Windows 10: $($_.Exception.Message)" "WARNING"
+        Write-Log "Continuing with Windows 11 upgrade attempt on current build" "WARNING"
         return $true
     }
 }
