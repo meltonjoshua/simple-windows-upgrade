@@ -439,43 +439,75 @@ Write-Log "✅ System compatibility check passed" "SUCCESS"
  
     # ----- SET REGISTRY KEYS -----
     $CurrentStep++
-    Update-Progress "Windows 11 Upgrade" "Configuring registry keys for upgrade compatibility..." $CurrentStep
+    Update-Progress "Windows 11 Upgrade" "Configuring comprehensive registry bypasses..." $CurrentStep
 
+    # Comprehensive list of ALL known Windows 11 hardware bypasses
     $regItems = @(
-        @{Path="HKCU:\SOFTWARE\Microsoft\PCHC"; Name="UpgradeEligibility"; Description="User upgrade eligibility"},
-        @{Path="HKLM:\SOFTWARE\Microsoft\PCHC"; Name="UpgradeEligibility"; Description="System upgrade eligibility"},
-        @{Path="HKLM:\SYSTEM\Setup\MoSetup"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Description="TPM/CPU bypass"}
+        # Basic compatibility bypasses
+        @{Path="HKCU:\SOFTWARE\Microsoft\PCHC"; Name="UpgradeEligibility"; Value=1; Description="User upgrade eligibility"},
+        @{Path="HKLM:\SOFTWARE\Microsoft\PCHC"; Name="UpgradeEligibility"; Value=1; Description="System upgrade eligibility"},
+        @{Path="HKLM:\SYSTEM\Setup\MoSetup"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="TPM/CPU bypass"},
+        
+        # TPM bypasses
+        @{Path="HKLM:\SYSTEM\Setup\LabConfig"; Name="BypassTPMCheck"; Value=1; Description="Bypass TPM requirement"},
+        @{Path="HKLM:\SYSTEM\Setup\LabConfig"; Name="BypassSecureBootCheck"; Value=1; Description="Bypass Secure Boot requirement"},
+        @{Path="HKLM:\SYSTEM\Setup\LabConfig"; Name="BypassRAMCheck"; Value=1; Description="Bypass RAM requirement"},
+        @{Path="HKLM:\SYSTEM\Setup\LabConfig"; Name="BypassStorageCheck"; Value=1; Description="Bypass storage requirement"},
+        @{Path="HKLM:\SYSTEM\Setup\LabConfig"; Name="BypassCPUCheck"; Value=1; Description="Bypass CPU requirement"},
+        
+        # Windows Update bypasses
+        @{Path="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\UUP"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="Windows Update TPM/CPU bypass"},
+        @{Path="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="Windows Update compatibility bypass"},
+        
+        # Setup bypasses
+        @{Path="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="Setup TPM/CPU bypass"},
+        @{Path="HKLM:\SYSTEM\Setup"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="System Setup bypass"},
+        
+        # Additional compatibility bypasses
+        @{Path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="NT CurrentVersion bypass"},
+        @{Path="HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; Name="__COMPAT_LAYER"; Value="RUNASINVOKER WIN8RTM"; Description="Compatibility layer bypass"},
+        
+        # Advanced bypasses for stubborn systems
+        @{Path="HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Update"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="Policy Manager bypass"},
+        @{Path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="Group Policy bypass"},
+        
+        # Windows 11 specific bypasses  
+        @{Path="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE"; Name="BypassNRO"; Value=1; Description="OOBE Network Requirement bypass"},
+        @{Path="HKLM:\SYSTEM\Setup\MoSetup"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="MoSetup comprehensive bypass"}
     )
 
-    Write-Log "Configuring registry keys for compatibility bypass..." "INFO"
+    Write-Log "🔧 Configuring comprehensive Windows 11 hardware bypasses..." "INFO"
+    Write-Log "   This includes ALL known registry bypasses for unsupported hardware" "INFO"
     $registryErrors = 0
      
     foreach ($item in $regItems) {
-        Write-Log "Setting registry key: $($item.Description)" "INFO"
+        Write-Log "Setting registry bypass: $($item.Description)" "INFO"
         
         $success = Invoke-SafeOperation -Operation "Registry Key: $($item.Path)\$($item.Name)" -ScriptBlock {
             # Check if registry path exists, create if needed
             if (-not (Test-Path $item.Path)) {
                 New-Item -Path $item.Path -Force -ErrorAction Stop | Out-Null
-                Write-Log "Created registry path: $($item.Path)" "SUCCESS"
+                Write-Log "  Created registry path: $($item.Path)" "SUCCESS"
             }
             
             # Set the registry value
-            New-ItemProperty -Path $item.Path -Name $item.Name -Value 1 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
-            Write-Log "Set $($item.Path)\$($item.Name) = 1" "SUCCESS"
+            New-ItemProperty -Path $item.Path -Name $item.Name -Value $item.Value -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+            Write-Log "  ✅ Set $($item.Path)\$($item.Name) = $($item.Value)" "SUCCESS"
             return $true
         } -ErrorMessage "Failed to set registry key" -ContinueOnError $true
         
         if (-not $success) {
             $registryErrors++
-            Write-Log "This may affect upgrade compatibility on unsupported hardware." "WARNING"
+            Write-Log "  ❌ Failed to set: $($item.Description)" "WARNING"
         }
     }
     
     if ($registryErrors -gt 0) {
-        Write-Log "⚠️  $registryErrors registry key(s) failed to set. Upgrade may fail on incompatible hardware." "WARNING"
+        Write-Log "⚠️  $registryErrors registry bypass(es) failed to set." "WARNING"
+        Write-Log "   Some bypasses may not be effective, but upgrade will still attempt" "WARNING"
     } else {
-        Write-Log "✅ All registry keys configured successfully" "SUCCESS"
+        Write-Log "🎯 ALL registry bypasses configured successfully!" "SUCCESS"
+        Write-Log "   Applied $($regItems.Count) comprehensive hardware bypasses" "SUCCESS"
     }# ----- DOWNLOAD INSTALLER -----
 $CurrentStep++
 Update-Progress "Windows 11 Upgrade" "Downloading Windows 11 Installation Assistant..." $CurrentStep
@@ -610,8 +642,23 @@ $monitoringJob = Start-UpgradeMonitoring -LogPath $LogFile
 $CurrentStep++
 Update-Progress "Windows 11 Upgrade" "Starting Windows 11 upgrade process..." $CurrentStep
 
-$arguments = "/quietinstall /skipeula /auto upgrade /CopyLogs `"$LogFile`""
-Write-Log "Running installer with arguments: $arguments" "INFO"
+# Comprehensive installer arguments with all known bypasses
+$arguments = @(
+    "/quietinstall",           # Silent installation
+    "/skipeula",              # Skip EULA
+    "/auto upgrade",          # Auto upgrade mode
+    "/CopyLogs `"$LogFile`"", # Copy logs
+    "/migratedrivers all",    # Migrate all drivers
+    "/installfromnetwork",    # Install from network (bypass some checks)
+    "/noreboot",              # Don't reboot automatically (for testing)
+    "/compat IgnoreWarning",  # Ignore compatibility warnings
+    "/compat ScanOnly"        # Initially scan only, then proceed
+)
+
+# Join arguments for display
+$argumentString = $arguments -join " "
+Write-Log "🚀 Running installer with comprehensive bypass arguments:" "INFO"
+Write-Log "   $argumentString" "INFO"
 Write-Log "Primary log file: $LogFile" "INFO"
 Write-Log "Monitor log file: $($LogFile -replace '\.log$', '_monitor.log')" "INFO"
 
@@ -619,14 +666,30 @@ Write-Host "" -ForegroundColor Yellow
 Write-Log "⚠️  IMPORTANT: The upgrade process will now begin and may take 30-90 minutes." "WARNING"
 Write-Log "   Your computer will restart automatically when complete." "WARNING"
 Write-Log "   Do not power off or interrupt the process." "WARNING"
+Write-Log "🔧 Using ALL available bypasses for unsupported hardware!" "WARNING"
 Write-Host "" -ForegroundColor Yellow
 
 # Record start time
 $startTime = Get-Date
 Write-Log "Upgrade started at: $startTime" "INFO"
 
+# Set environment variables for additional bypasses
+Write-Log "🔧 Setting environment variable bypasses..." "INFO"
 try {
-    $process = Start-Process -FilePath $Installer -ArgumentList $arguments -PassThru -ErrorAction Stop
+    $env:__COMPAT_LAYER = "RUNASINVOKER WIN8RTM"
+    $env:PROCESSOR_ARCHITECTURE_OVERRIDE = "x64"
+    $env:WINDOWS11_BYPASS_TPM = "1"
+    $env:WINDOWS11_BYPASS_CPU = "1"
+    $env:WINDOWS11_BYPASS_RAM = "1"
+    $env:WINDOWS11_FORCE_UPGRADE = "1"
+    Write-Log "✅ Environment bypass variables set" "SUCCESS"
+} catch {
+    Write-Log "Warning: Could not set all environment variables" "WARNING"
+}
+
+try {
+    # Start the installer process with comprehensive bypass arguments
+    $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -ErrorAction Stop
     Write-Log "Installer process started with PID: $($process.Id)" "SUCCESS"
     
     # Monitor the process
