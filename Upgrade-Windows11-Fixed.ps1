@@ -950,6 +950,70 @@ try {
             }
         } else {
             Write-Log "❌ No active upgrade processes found - may need manual intervention" "WARNING"
+            
+            # Try alternative Windows Update method
+            Write-Log "🔄 Attempting Windows Update method as fallback..." "INFO"
+            try {
+                # Check if Windows 11 is available via Windows Update
+                $updateSession = New-Object -ComObject Microsoft.Update.Session
+                $updateSearcher = $updateSession.CreateUpdateSearcher()
+                $updateSearcher.Online = $true
+                
+                Write-Log "🔍 Searching for Windows 11 feature update via Windows Update..." "INFO"
+                $searchResult = $updateSearcher.Search("IsInstalled=0 and Type='Software' and CategoryIDs contains '5312e4f1-6372-442d-aeb2-15f2132c9bd7'")
+                
+                if ($searchResult.Updates.Count -gt 0) {
+                    Write-Log "✅ Found Windows 11 feature update via Windows Update!" "SUCCESS"
+                    
+                    $windows11Update = $searchResult.Updates | Where-Object { $_.Title -like "*Windows 11*" -or $_.Title -like "*feature update*" } | Select-Object -First 1
+                    
+                    if ($windows11Update) {
+                        Write-Log "📦 Available update: $($windows11Update.Title)" "INFO"
+                        Write-Log "🚀 Initiating Windows 11 upgrade via Windows Update..." "INFO"
+                        
+                        # Create update collection and download
+                        $updateCollection = New-Object -ComObject Microsoft.Update.UpdateColl
+                        $updateCollection.Add($windows11Update) | Out-Null
+                        
+                        $downloader = $updateSession.CreateUpdateDownloader()
+                        $downloader.Updates = $updateCollection
+                        Write-Log "⬇️  Downloading Windows 11 update..." "INFO"
+                        $downloadResult = $downloader.Download()
+                        
+                        if ($downloadResult.ResultCode -eq 2) {
+                            Write-Log "✅ Download completed successfully" "SUCCESS"
+                            
+                            # Install the update
+                            $installer = $updateSession.CreateUpdateInstaller()
+                            $installer.Updates = $updateCollection
+                            Write-Log "🔧 Installing Windows 11 update..." "INFO"
+                            $installResult = $installer.Install()
+                            
+                            if ($installResult.ResultCode -eq 2) {
+                                Write-Log "🎉 Windows 11 update installed successfully via Windows Update!" "SUCCESS"
+                                if ($installResult.RebootRequired) {
+                                    Write-Log "🔄 System restart required to complete upgrade" "INFO"
+                                    if ($AutomaticMode -or $ForceRestart) {
+                                        Write-Log "🤖 Scheduling automatic restart..." "INFO"
+                                        Start-Process "shutdown.exe" -ArgumentList "/r", "/t", "120", "/c", "Windows 11 upgrade requires restart" -WindowStyle Hidden
+                                    }
+                                }
+                            } else {
+                                Write-Log "⚠️  Windows Update installation completed with code: $($installResult.ResultCode)" "WARNING"
+                            }
+                        } else {
+                            Write-Log "❌ Windows Update download failed with code: $($downloadResult.ResultCode)" "ERROR"
+                        }
+                    }
+                } else {
+                    Write-Log "❌ Windows 11 not available via Windows Update for this system" "WARNING"
+                    Write-Log "💡 This system may not be eligible for Windows 11 upgrade" "INFO"
+                    Write-Log "🔍 Check Windows 11 compatibility at: https://aka.ms/GetWindows11" "INFO"
+                }
+            } catch {
+                Write-Log "❌ Windows Update method failed: $($_.Exception.Message)" "ERROR"
+                Write-Log "💡 System may not be compatible with Windows 11" "WARNING"
+            }
         }
         
         if (-not $AutomaticMode) {
