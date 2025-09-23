@@ -594,35 +594,77 @@ try {
     $CurrentStep++
     Update-Progress "Windows 11 Upgrade" "Starting Windows 11 upgrade..." $CurrentStep
     
-    # Check if Windows 11 Installation Assistant is already running
-    $existingProcess = Get-Process -Name "Windows11InstallationAssistant" -ErrorAction SilentlyContinue
-    if ($existingProcess) {
-        Write-Log "⚠️  Windows 11 Installation Assistant is already running" "WARNING"
-        Write-Log "🔄 Terminating existing instance to prevent conflicts..." "INFO"
-        
+    # Check for and terminate any existing Windows 11 or setup-related processes
+    $processesToKill = @(
+        "Windows11InstallationAssistant",
+        "Windows11Upgrade", 
+        "SetupHost",
+        "Windows11Setup",
+        "Windows11MediaCreationTool",
+        "MediaCreationTool*",
+        "Windows10Upgrade*",
+        "WindowsUpdateBox"
+    )
+    
+    Write-Log "🔍 Checking for conflicting processes..." "INFO"
+    $killedProcesses = 0
+    
+    foreach ($processPattern in $processesToKill) {
         try {
-            $existingProcess | Stop-Process -Force
-            Start-Sleep -Seconds 3
-            Write-Log "✅ Existing instance terminated" "SUCCESS"
+            # Handle wildcard patterns
+            if ($processPattern -like "*`*") {
+                $processes = Get-Process | Where-Object { $_.ProcessName -like $processPattern }
+            } else {
+                $processes = Get-Process -Name $processPattern -ErrorAction SilentlyContinue
+            }
+            
+            if ($processes) {
+                foreach ($proc in $processes) {
+                    Write-Log "� Terminating conflicting process: $($proc.ProcessName) (PID: $($proc.Id))" "INFO"
+                    try {
+                        $proc | Stop-Process -Force
+                        $killedProcesses++
+                    } catch {
+                        Write-Log "Could not terminate $($proc.ProcessName) - trying taskkill..." "WARNING"
+                        Start-Process "taskkill" -ArgumentList "/F", "/PID", $proc.Id -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
+                    }
+                }
+            }
         } catch {
-            Write-Log "❌ Could not terminate existing instance: $($_.Exception.Message)" "ERROR"
-            Write-Log "🔄 Attempting to continue anyway..." "INFO"
+            # Ignore errors for non-existent processes
         }
     }
     
-    # Also check for any Windows Update or setup processes that might interfere
-    $interferingProcesses = @("Windows11InstallationAssistant", "SetupHost", "Windows11Upgrade")
-    foreach ($processName in $interferingProcesses) {
-        $processes = Get-Process -Name $processName -ErrorAction SilentlyContinue
-        if ($processes) {
-            Write-Log "🛑 Terminating interfering process: $processName" "INFO"
+    if ($killedProcesses -gt 0) {
+        Write-Log "✅ Terminated $killedProcesses conflicting processes" "SUCCESS"
+        Write-Log "⏳ Waiting 5 seconds for process cleanup..." "INFO"
+        Start-Sleep -Seconds 5
+    } else {
+        Write-Log "✅ No conflicting processes found" "SUCCESS"
+    }
+    
+    # Also check for running installer files directly
+    try {
+        $runningInstallers = Get-Process | Where-Object { 
+            $_.Path -and (
+                $_.Path -like "*Windows11InstallationAssistant*" -or
+                $_.Path -like "*Windows11*" -or
+                $_.ProcessName -like "*setup*" -or
+                $_.ProcessName -like "*upgrade*"
+            )
+        }
+        
+        foreach ($installer in $runningInstallers) {
+            Write-Log "🛑 Terminating installer process: $($installer.ProcessName) at $($installer.Path)" "INFO"
             try {
-                $processes | Stop-Process -Force
+                $installer | Stop-Process -Force
                 Start-Sleep -Seconds 2
             } catch {
-                Write-Log "Could not terminate $processName - continuing anyway" "WARNING"
+                Write-Log "Could not terminate installer process" "WARNING"
             }
         }
+    } catch {
+        # Ignore errors
     }
     
     # Automatic restart arguments for enterprise deployment
@@ -643,7 +685,7 @@ try {
         Write-Log "✅ Cleaned up restart continuation task" "SUCCESS"
     } catch { }
     
-    # Add retry logic for the installer
+    # Add retry logic for the installer with different approaches
     $maxRetries = 3
     $retryCount = 0
     $installerSuccess = $false
@@ -653,22 +695,68 @@ try {
         
         if ($retryCount -gt 1) {
             Write-Log "🔄 Installer attempt $retryCount of $maxRetries..." "INFO"
-            Start-Sleep -Seconds 10
+            
+            # More aggressive cleanup between retries
+            Write-Log "🧹 Performing aggressive cleanup before retry..." "INFO"
+            
+            # Kill any remaining processes
+            Get-Process | Where-Object { 
+                $_.ProcessName -like "*Windows11*" -or 
+                $_.ProcessName -like "*setup*" -or 
+                $_.ProcessName -like "*upgrade*" 
+            } | ForEach-Object {
+                try { $_ | Stop-Process -Force -ErrorAction SilentlyContinue } catch { }
+            }
+            
+            # Remove temp files
+            if (Test-Path $Installer) {
+                Remove-Item $Installer -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 2
+                
+                # Re-download if needed
+                try {
+                    Invoke-WebRequest -Uri $DownloadUrl -OutFile $Installer -UseBasicParsing -TimeoutSec 60
+                    Write-Log "✅ Re-downloaded installer for retry" "SUCCESS"
+                } catch {
+                    Write-Log "❌ Failed to re-download installer" "ERROR"
+                    continue
+                }
+            }
+            
+            Start-Sleep -Seconds 5
         }
         
         try {
-            $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -WindowStyle Hidden -Wait
+            Write-Log "▶️  Starting installer process (attempt $retryCount)..." "INFO"
+            
+            # Try with different startup methods
+            if ($retryCount -eq 1) {
+                # Standard method
+                $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -WindowStyle Hidden -Wait
+            } elseif ($retryCount -eq 2) {
+                # Alternative method - visible window
+                $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -Wait
+            } else {
+                # Last resort - minimal arguments
+                $simpleArgs = @("/quietinstall", "/auto upgrade")
+                $process = Start-Process -FilePath $Installer -ArgumentList ($simpleArgs -join " ") -PassThru -Wait
+            }
+            
             $installerSuccess = $true
+            Write-Log "✅ Installer process completed with exit code: $($process.ExitCode)" "SUCCESS"
+            
         } catch {
             Write-Log "❌ Installer attempt $retryCount failed: $($_.Exception.Message)" "ERROR"
             if ($retryCount -lt $maxRetries) {
-                Write-Log "🔄 Retrying in 10 seconds..." "INFO"
+                Write-Log "🔄 Will retry in 10 seconds..." "INFO"
+                Start-Sleep -Seconds 10
             }
         }
     }
     
     if (-not $installerSuccess) {
         Write-Log "❌ Installer failed after $maxRetries attempts" "ERROR"
+        Write-Log "💡 Try running manually: $Installer /quietinstall /auto upgrade" "INFO"
         exit 6
     }
     
