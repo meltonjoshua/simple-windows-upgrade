@@ -687,9 +687,64 @@ try {
     Write-Log "Warning: Could not set all environment variables" "WARNING"
 }
 
+# Create and set permissions for Windows installation directories
+Write-Log "🔧 Preparing installation directories with proper permissions..." "INFO"
 try {
-    # Start the installer process with comprehensive bypass arguments
-    $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -ErrorAction Stop
+    $installDirs = @(
+        "C:\`$Windows.~BT",
+        "C:\`$Windows.~WS", 
+        "C:\Windows.old",
+        "C:\ESD",
+        "C:\`$WINDOWS.~BT\Sources",
+        "C:\Windows\SoftwareDistribution\Download"
+    )
+    
+    foreach ($dir in $installDirs) {
+        if (-not (Test-Path $dir)) {
+            try {
+                New-Item -Path $dir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+                Write-Log "  Created directory: $dir" "SUCCESS"
+            } catch {
+                Write-Log "  Could not create: $dir" "WARNING"
+            }
+        }
+        
+        # Set full permissions for current user and SYSTEM
+        try {
+            $acl = Get-Acl $dir -ErrorAction SilentlyContinue
+            if ($acl) {
+                $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    [System.Security.Principal.WindowsIdentity]::GetCurrent().Name,
+                    "FullControl",
+                    "ContainerInherit,ObjectInherit",
+                    "None",
+                    "Allow"
+                )
+                $acl.SetAccessRule($accessRule)
+                Set-Acl -Path $dir -AclObject $acl -ErrorAction SilentlyContinue
+                Write-Log "  ✅ Set permissions for: $dir" "SUCCESS"
+            }
+        } catch {
+            Write-Log "  Warning: Could not set permissions for: $dir" "WARNING"
+        }
+    }
+    
+    Write-Log "✅ Installation directory permissions configured" "SUCCESS"
+} catch {
+    Write-Log "Warning: Some permission configurations failed" "WARNING"
+}
+
+try {
+    # Start the installer process with comprehensive bypass arguments and elevated privileges
+    $processStartInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $processStartInfo.FileName = $Installer
+    $processStartInfo.Arguments = $argumentString
+    $processStartInfo.UseShellExecute = $true
+    $processStartInfo.Verb = "runas"  # Force run as administrator
+    $processStartInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    
+    Write-Log "🚀 Starting installer with elevated privileges..." "INFO"
+    $process = [System.Diagnostics.Process]::Start($processStartInfo)
     Write-Log "Installer process started with PID: $($process.Id)" "SUCCESS"
     
     # Monitor the process
