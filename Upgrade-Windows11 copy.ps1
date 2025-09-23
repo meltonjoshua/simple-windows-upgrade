@@ -229,12 +229,13 @@ function Test-SystemCompatibility {
         $compatibility.Compatible = $false
     }
     
-    # Check RAM
+    # Check RAM (with bypass capability)
     Invoke-SafeOperation -Operation "RAM Check" -ScriptBlock {
         $ramGB = [math]::Round((Get-WmiObject -Class Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB, 2)
         if ($ramGB -lt 4) {
-            $compatibility.Issues += "Insufficient RAM: ${ramGB}GB (4GB minimum required)"
-            $compatibility.Compatible = $false
+            # With registry bypasses, treat RAM as warning instead of hard failure
+            $compatibility.Warnings += "Low RAM: ${ramGB}GB (4GB recommended, but bypass enabled)"
+            Write-Log "RAM: ${ramGB}GB (below 4GB minimum, but will use registry bypass)" "WARNING"
         } else {
             Write-Log "RAM: ${ramGB}GB" "SUCCESS"
         }
@@ -462,43 +463,23 @@ Write-Log "✅ System compatibility check passed" "SUCCESS"
     $CurrentStep++
     Update-Progress "Windows 11 Upgrade" "Configuring comprehensive registry bypasses..." $CurrentStep
 
-    # Comprehensive list of ALL known Windows 11 hardware bypasses
+    # Essential Windows 11 hardware bypasses (streamlined)
     $regItems = @(
-        # Basic compatibility bypasses
-        @{Path="HKCU:\SOFTWARE\Microsoft\PCHC"; Name="UpgradeEligibility"; Value=1; Description="User upgrade eligibility"},
-        @{Path="HKLM:\SOFTWARE\Microsoft\PCHC"; Name="UpgradeEligibility"; Value=1; Description="System upgrade eligibility"},
-        @{Path="HKLM:\SYSTEM\Setup\MoSetup"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="TPM/CPU bypass"},
-        
-        # TPM bypasses
+        # Core bypasses - these are the most important
         @{Path="HKLM:\SYSTEM\Setup\LabConfig"; Name="BypassTPMCheck"; Value=1; Description="Bypass TPM requirement"},
         @{Path="HKLM:\SYSTEM\Setup\LabConfig"; Name="BypassSecureBootCheck"; Value=1; Description="Bypass Secure Boot requirement"},
         @{Path="HKLM:\SYSTEM\Setup\LabConfig"; Name="BypassRAMCheck"; Value=1; Description="Bypass RAM requirement"},
-        @{Path="HKLM:\SYSTEM\Setup\LabConfig"; Name="BypassStorageCheck"; Value=1; Description="Bypass storage requirement"},
         @{Path="HKLM:\SYSTEM\Setup\LabConfig"; Name="BypassCPUCheck"; Value=1; Description="Bypass CPU requirement"},
         
-        # Windows Update bypasses
-        @{Path="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\UUP"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="Windows Update TPM/CPU bypass"},
-        @{Path="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="Windows Update compatibility bypass"},
+        # MoSetup bypass - essential for Installation Assistant
+        @{Path="HKLM:\SYSTEM\Setup\MoSetup"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="Installation Assistant bypass"},
         
-        # Setup bypasses
-        @{Path="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="Setup TPM/CPU bypass"},
-        @{Path="HKLM:\SYSTEM\Setup"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="System Setup bypass"},
-        
-        # Additional compatibility bypasses
-        @{Path="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="NT CurrentVersion bypass"},
-        @{Path="HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; Name="__COMPAT_LAYER"; Value="RUNASINVOKER WIN8RTM"; Description="Compatibility layer bypass"},
-        
-        # Advanced bypasses for stubborn systems
-        @{Path="HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Update"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="Policy Manager bypass"},
-        @{Path="HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="Group Policy bypass"},
-        
-        # Windows 11 specific bypasses  
-        @{Path="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE"; Name="BypassNRO"; Value=1; Description="OOBE Network Requirement bypass"},
-        @{Path="HKLM:\SYSTEM\Setup\MoSetup"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="MoSetup comprehensive bypass"}
+        # Windows Update bypass - for update-based installs  
+        @{Path="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Value=1; Description="Windows Update bypass"}
     )
 
-    Write-Log "🔧 Configuring comprehensive Windows 11 hardware bypasses..." "INFO"
-    Write-Log "   This includes ALL known registry bypasses for unsupported hardware" "INFO"
+    Write-Log "🔧 Configuring essential Windows 11 hardware bypasses..." "INFO"
+    Write-Log "   Applying only the most effective registry bypasses" "INFO"
     $registryErrors = 0
      
     foreach ($item in $regItems) {
@@ -527,8 +508,8 @@ Write-Log "✅ System compatibility check passed" "SUCCESS"
         Write-Log "⚠️  $registryErrors registry bypass(es) failed to set." "WARNING"
         Write-Log "   Some bypasses may not be effective, but upgrade will still attempt" "WARNING"
     } else {
-        Write-Log "🎯 ALL registry bypasses configured successfully!" "SUCCESS"
-        Write-Log "   Applied $($regItems.Count) comprehensive hardware bypasses" "SUCCESS"
+        Write-Log "🎯 Essential registry bypasses configured successfully!" "SUCCESS"
+        Write-Log "   Applied $($regItems.Count) core hardware bypasses" "SUCCESS"
     }# ----- DOWNLOAD INSTALLER -----
 $CurrentStep++
 Update-Progress "Windows 11 Upgrade" "Downloading Windows 11 Installation Assistant..." $CurrentStep
@@ -663,24 +644,20 @@ $monitoringJob = Start-UpgradeMonitoring -LogPath $LogFile
 $CurrentStep++
 Update-Progress "Windows 11 Upgrade" "Starting Windows 11 upgrade process..." $CurrentStep
 
-# Comprehensive installer arguments with custom temp directory
+# Essential installer arguments (streamlined)
 $customInstallDir = "C:\Temp\Windows11Install"
 $arguments = @(
     "/quietinstall",           # Silent installation
     "/skipeula",              # Skip EULA
     "/auto upgrade",          # Auto upgrade mode
     "/CopyLogs `"$LogFile`"", # Copy logs
-    "/migratedrivers all",    # Migrate all drivers
-    "/installfromnetwork",    # Install from network (bypass some checks)
-    "/noreboot",              # Don't reboot automatically (for testing)
-    "/compat IgnoreWarning",  # Ignore compatibility warnings
-    "/compat ScanOnly",       # Initially scan only, then proceed
-    "/TempDrive C:",          # Force temp drive
-    "/DynamicUpdate Disable"  # Disable dynamic updates that might need permissions
+    "/noreboot"               # Don't reboot automatically
 )
 
 # Create custom installation directory with full permissions
-Write-Log "🔧 Creating custom installation directory with full permissions..." "INFO"
+Write-Log "🔧 Creating custom installation directory..." "INFO"
+# Create custom installation directory with full permissions
+Write-Log "🔧 Creating custom installation directory..." "INFO"
 try {
     if (Test-Path $customInstallDir) {
         Remove-Item $customInstallDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -695,11 +672,6 @@ try {
     $acl.SetAccessRule($accessRule)
     Set-Acl -Path $customInstallDir -AclObject $acl
     
-    # Set TEMP and TMP environment variables to our directory
-    $env:TEMP = $customInstallDir
-    $env:TMP = $customInstallDir
-    $env:WINDOWS_INSTALL_TEMP = $customInstallDir
-    
     Write-Log "✅ Custom installation directory created: $customInstallDir" "SUCCESS"
 } catch {
     Write-Log "Warning: Could not create custom installation directory" "WARNING"
@@ -707,7 +679,7 @@ try {
 
 # Join arguments for display
 $argumentString = $arguments -join " "
-Write-Log "🚀 Running installer with comprehensive bypass arguments:" "INFO"
+Write-Log "🚀 Running installer with essential bypass arguments:" "INFO"
 Write-Log "   $argumentString" "INFO"
 Write-Log "Primary log file: $LogFile" "INFO"
 Write-Log "Monitor log file: $($LogFile -replace '\.log$', '_monitor.log')" "INFO"
@@ -716,72 +688,21 @@ Write-Host "" -ForegroundColor Yellow
 Write-Log "⚠️  IMPORTANT: The upgrade process will now begin and may take 30-90 minutes." "WARNING"
 Write-Log "   Your computer will restart automatically when complete." "WARNING"
 Write-Log "   Do not power off or interrupt the process." "WARNING"
-Write-Log "🔧 Using ALL available bypasses for unsupported hardware!" "WARNING"
+Write-Log "🔧 Using streamlined bypasses for maximum compatibility!" "WARNING"
 Write-Host "" -ForegroundColor Yellow
 
 # Record start time
 $startTime = Get-Date
 Write-Log "Upgrade started at: $startTime" "INFO"
 
-# Set environment variables for additional bypasses
-Write-Log "🔧 Setting environment variable bypasses..." "INFO"
+# Set essential environment variables for bypasses
+Write-Log "🔧 Setting essential environment bypasses..." "INFO"
 try {
-    $env:__COMPAT_LAYER = "RUNASINVOKER WIN8RTM"
-    $env:PROCESSOR_ARCHITECTURE_OVERRIDE = "x64"
-    $env:WINDOWS11_BYPASS_TPM = "1"
-    $env:WINDOWS11_BYPASS_CPU = "1"
-    $env:WINDOWS11_BYPASS_RAM = "1"
-    $env:WINDOWS11_FORCE_UPGRADE = "1"
-    Write-Log "✅ Environment bypass variables set" "SUCCESS"
+    $env:TEMP = $customInstallDir
+    $env:TMP = $customInstallDir
+    Write-Log "✅ Essential environment variables set" "SUCCESS"
 } catch {
-    Write-Log "Warning: Could not set all environment variables" "WARNING"
-}
-
-# Create and set permissions for Windows installation directories
-Write-Log "🔧 Preparing installation directories with proper permissions..." "INFO"
-try {
-    $installDirs = @(
-        "C:\`$Windows.~BT",
-        "C:\`$Windows.~WS", 
-        "C:\Windows.old",
-        "C:\ESD",
-        "C:\`$WINDOWS.~BT\Sources",
-        "C:\Windows\SoftwareDistribution\Download"
-    )
-    
-    foreach ($dir in $installDirs) {
-        if (-not (Test-Path $dir)) {
-            try {
-                New-Item -Path $dir -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
-                Write-Log "  Created directory: $dir" "SUCCESS"
-            } catch {
-                Write-Log "  Could not create: $dir" "WARNING"
-            }
-        }
-        
-        # Set full permissions for current user and SYSTEM
-        try {
-            $acl = Get-Acl $dir -ErrorAction SilentlyContinue
-            if ($acl) {
-                $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                    [System.Security.Principal.WindowsIdentity]::GetCurrent().Name,
-                    "FullControl",
-                    "ContainerInherit,ObjectInherit",
-                    "None",
-                    "Allow"
-                )
-                $acl.SetAccessRule($accessRule)
-                Set-Acl -Path $dir -AclObject $acl -ErrorAction SilentlyContinue
-                Write-Log "  ✅ Set permissions for: $dir" "SUCCESS"
-            }
-        } catch {
-            Write-Log "  Warning: Could not set permissions for: $dir" "WARNING"
-        }
-    }
-    
-    Write-Log "✅ Installation directory permissions configured" "SUCCESS"
-} catch {
-    Write-Log "Warning: Some permission configurations failed" "WARNING"
+    Write-Log "Warning: Could not set environment variables" "WARNING"
 }
 
 try {
