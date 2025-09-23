@@ -728,17 +728,23 @@ try {
                 }
             }
             
-            # Try to run installer interactively to get more info
-            Write-Log "Attempting interactive run to capture any dialogs..." "INFO"
+            # Try to run installer interactively to capture more info
+            Write-Log "🔍 Attempting interactive run to capture any dialogs..." "INFO"
             try {
                 $interactiveProcess = Start-Process -FilePath $Installer -PassThru -WindowStyle Hidden
-                Start-Sleep 5  # Give it time to show any dialogs
+                Start-Sleep 3  # Give it time to show any dialogs
                 
                 if (-not $interactiveProcess.HasExited) {
-                    Write-Log "Interactive installer is still running - may be showing dialogs" "INFO"
-                    $interactiveProcess.Kill()
+                    Write-Log "✅ Interactive installer is still running - may be showing dialogs" "INFO"
+                    Start-Sleep 2
+                    if (-not $interactiveProcess.HasExited) {
+                        Write-Log "🔍 Installer running longer interactively - stopping test" "INFO"
+                        $interactiveProcess.Kill()
+                        Write-Log "✅ This suggests the installer CAN run but exits quickly in silent mode" "SUCCESS"
+                    }
                 } else {
-                    Write-Log "Interactive installer also exited quickly (Exit: $($interactiveProcess.ExitCode))" "INFO"
+                    Write-Log "❌ Interactive installer also exited quickly (Exit: $($interactiveProcess.ExitCode))" "WARNING"
+                    Write-Log "   This confirms the installer is detecting an issue and refusing to run" "WARNING"
                 }
             } catch {
                 Write-Log "Could not run interactive test: $($_.Exception.Message)" "WARNING"
@@ -751,32 +757,45 @@ try {
                 $currentBuild = [int]$currentOS.CurrentBuild
                 
                 if ($currentBuild -ge 22000) {
-                    Write-Log "DIAGNOSIS: System is already Windows 11 or newer (Build $currentBuild)" "WARNING"
-                    Write-Log "The Installation Assistant detected this and exited without upgrading" "WARNING"
+                    Write-Log "🔍 DIAGNOSIS: System is already Windows 11 or newer (Build $currentBuild)" "WARNING"
+                    Write-Log "   The Installation Assistant detected this and exited without upgrading" "WARNING"
                 } elseif ($currentBuild -eq 19045) {
-                    Write-Log "DIAGNOSIS: Windows 10 22H2 (Build 19045) - should be upgradeable" "INFO"
-                    Write-Log "Quick exit suggests hardware compatibility issue despite bypass" "WARNING"
+                    Write-Log "🔍 DIAGNOSIS: Windows 10 22H2 (Build 19045) - should be upgradeable" "INFO"
+                    Write-Log "   Quick exit suggests hardware compatibility issue despite bypass" "WARNING"
                 } else {
-                    Write-Log "DIAGNOSIS: Windows 10 Build $currentBuild - checking compatibility" "INFO"
+                    Write-Log "🔍 DIAGNOSIS: Windows 10 Build $currentBuild - checking compatibility" "INFO"
                 }
                 
-                # Check if PC meets basic requirements
+                # Enhanced CPU compatibility check
                 $cpu = Get-WmiObject -Class Win32_Processor | Select-Object -First 1
                 $cpuName = $cpu.Name
-                Write-Log "CPU Model: $cpuName" "INFO"
+                Write-Log "🔍 CPU Model: $cpuName" "INFO"
                 
-                # Check if CPU is on supported list (basic check)
-                if ($cpuName -like "*i3-*" -or $cpuName -like "*i5-*" -or $cpuName -like "*i7-*" -or $cpuName -like "*i9-*") {
-                    if ($cpuName -like "*-[1-7]*") {
-                        Write-Log "POTENTIAL ISSUE: CPU appears to be 7th gen Intel or older" "WARNING"
-                        Write-Log "Windows 11 officially requires 8th gen Intel or newer" "WARNING"
+                # More detailed CPU generation detection
+                if ($cpuName -match "i[3579]-(\d+)") {
+                    $cpuGen = [int]$matches[1].Substring(0,1)
+                    Write-Log "🔍 Detected Intel Generation: $cpuGen" "INFO"
+                    
+                    if ($cpuGen -lt 8) {
+                        Write-Log "❌ POTENTIAL ISSUE: CPU is ${cpuGen}th gen Intel (detected from $cpuName)" "WARNING"
+                        Write-Log "   Windows 11 officially requires 8th gen Intel or newer" "WARNING"
+                        Write-Log "   This is likely why the installer is exiting quickly" "WARNING"
                     } else {
-                        Write-Log "CPU appears to be compatible" "SUCCESS"
+                        Write-Log "✅ CPU generation appears compatible (${cpuGen}th gen)" "SUCCESS"
                     }
+                } elseif ($cpuName -like "*AMD*") {
+                    Write-Log "🔍 AMD CPU detected - checking compatibility..." "INFO"
+                    if ($cpuName -like "*Ryzen*") {
+                        Write-Log "✅ AMD Ryzen CPU should be compatible" "SUCCESS"
+                    } else {
+                        Write-Log "⚠️  Older AMD CPU may not be compatible" "WARNING"
+                    }
+                } else {
+                    Write-Log "⚠️  Unknown CPU type - compatibility uncertain" "WARNING"
                 }
                 
             } catch {
-                Write-Log "Could not perform Windows 11 readiness check" "WARNING"
+                Write-Log "Could not perform Windows 11 readiness check: $($_.Exception.Message)" "WARNING"
             }
             
             # Check Windows Event Log for recent errors
@@ -793,18 +812,32 @@ try {
                 }
                 
                 if ($recentErrors) {
-                    Write-Log "Recent Windows-related errors found:" "WARNING"
+                    Write-Log "🔍 Recent Windows-related errors found:" "WARNING"
                     foreach ($error in $recentErrors) {
-                        $shortMessage = $error.Message.Substring(0, [Math]::Min(150, $error.Message.Length))
-                        Write-Log "  [$($error.TimeCreated)] $($error.LevelDisplayName): $shortMessage..." "WARNING"
+                        $shortMessage = $error.Message.Substring(0, [Math]::Min(120, $error.Message.Length))
+                        Write-Log "   [$($error.TimeCreated.ToString('HH:mm:ss'))] $($error.LevelDisplayName): $shortMessage..." "WARNING"
                     }
                 } else {
-                    Write-Log "No relevant recent errors found in Event Log" "INFO"
+                    Write-Log "✅ No relevant recent errors found in Event Log" "SUCCESS"
                 }
             } catch {
-                Write-Log "Could not check Windows Event Log" "WARNING"
+                Write-Log "Could not check Windows Event Log: $($_.Exception.Message)" "WARNING"
             }
-        }} catch {
+            
+            # Final diagnosis summary
+            Write-Log "" "INFO"
+            Write-Log "🔍 === QUICK EXIT DIAGNOSIS SUMMARY ===" "INFO"
+            Write-Log "   The Windows 11 Installation Assistant exited in $([math]::Round($totalTime.TotalMinutes, 1)) minutes" "INFO"
+            Write-Log "   This typically happens when:" "INFO"
+            Write-Log "   • System is already Windows 11" "INFO"
+            Write-Log "   • Hardware doesn't meet minimum requirements" "INFO"
+            Write-Log "   • CPU is unsupported (pre-8th gen Intel)" "INFO"
+            Write-Log "   • Enterprise policies block upgrades" "INFO"
+            Write-Log "   Check the diagnostics above for specific issues" "INFO"
+            Write-Log "" "INFO"
+        }
+    
+    } catch {
     Write-Log "Failed to start installer process: $($_.Exception.Message)" "ERROR"
     $process = @{ ExitCode = -1 }
     $totalTime = New-TimeSpan -Seconds 0
