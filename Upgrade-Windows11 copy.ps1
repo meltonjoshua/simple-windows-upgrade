@@ -71,9 +71,11 @@ function Test-SystemCompatibility {
         
         Write-Log "Current Windows: $($OS.ProductName) Build $currentBuild" "INFO"
         
-        if ($currentBuild -ge 22000) {
+        if ($currentBuild -ge 22000 -and $currentBuild -lt 26000) {
             $compatibility.Issues += "Already running Windows 11 (Build $currentBuild)"
             $compatibility.Compatible = $false
+        } elseif ($currentBuild -ge 26000) {
+            $compatibility.Warnings += "Running Windows 11 Insider Preview (Build $currentBuild) - upgrade may not be necessary"
         } elseif ($currentBuild -lt 18362) {
             $compatibility.Issues += "Windows 10 build too old (minimum 1903/18362 required)"
             $compatibility.Compatible = $false
