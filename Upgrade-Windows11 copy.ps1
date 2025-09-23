@@ -21,6 +21,12 @@ $DownloadUrl = "https://go.microsoft.com/fwlink/?linkid=2171764"
 # Progress tracking
 $TotalSteps = 8
 $CurrentStep = 0
+$ErrorCount = 0
+$WarningCount = 0
+
+# Error handling configuration
+$ErrorActionPreference = "Stop"
+$script:ExitCode = 0
 
 function Update-Progress {
     param(
@@ -50,10 +56,111 @@ function Write-Log {
             default { "White" }
         }
     )
+    
+    # Track error and warning counts
+    if ($Level -eq "ERROR") { $script:ErrorCount++ }
+    if ($Level -eq "WARNING") { $script:WarningCount++ }
+    
     # Also write to log file if it exists
-    if (Test-Path $LogFile) {
-        Add-Content -Path $LogFile -Value $logEntry
+    try {
+        if (Test-Path $LogFile) {
+            Add-Content -Path $LogFile -Value $logEntry -ErrorAction SilentlyContinue
+        }
+    } catch {
+        # Silently fail if we can't write to log file
     }
+}
+
+function Write-ErrorLog {
+    param(
+        [string]$Operation,
+        [System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [string]$AdditionalInfo = ""
+    )
+    
+    $errorDetails = @(
+        "Operation: $Operation"
+        "Error: $($ErrorRecord.Exception.Message)"
+        "Category: $($ErrorRecord.CategoryInfo.Category)"
+        "TargetObject: $($ErrorRecord.TargetObject)"
+        "ScriptLineNumber: $($ErrorRecord.InvocationInfo.ScriptLineNumber)"
+    )
+    
+    if ($AdditionalInfo) {
+        $errorDetails += "Additional Info: $AdditionalInfo"
+    }
+    
+    foreach ($detail in $errorDetails) {
+        Write-Log $detail "ERROR"
+    }
+}
+
+function Invoke-SafeOperation {
+    param(
+        [string]$Operation,
+        [scriptblock]$ScriptBlock,
+        [string]$SuccessMessage = "",
+        [string]$ErrorMessage = "",
+        [bool]$ContinueOnError = $true
+    )
+    
+    try {
+        $result = & $ScriptBlock
+        if ($SuccessMessage) {
+            Write-Log $SuccessMessage "SUCCESS"
+        }
+        return $result
+    }
+    catch {
+        Write-ErrorLog -Operation $Operation -ErrorRecord $_ -AdditionalInfo $ErrorMessage
+        
+        if (-not $ContinueOnError) {
+            throw
+        }
+        return $null
+    }
+}
+
+function Test-Prerequisites {
+    Write-Log "Checking script prerequisites..." "INFO"
+    $issues = @()
+    
+    # Check PowerShell version
+    try {
+        if ($PSVersionTable.PSVersion.Major -lt 3) {
+            $issues += "PowerShell version $($PSVersionTable.PSVersion) is too old (minimum 3.0 required)"
+        } else {
+            Write-Log "PowerShell version: $($PSVersionTable.PSVersion)" "SUCCESS"
+        }
+    } catch {
+        $issues += "Unable to determine PowerShell version"
+    }
+    
+    # Check .NET Framework version
+    try {
+        $dotNetVersion = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full\" -Name Release -ErrorAction Stop).Release
+        if ($dotNetVersion -lt 461808) {  # .NET 4.7.2
+            $issues += "Insufficient .NET Framework version (4.7.2+ required)"
+        } else {
+            Write-Log ".NET Framework version: Sufficient" "SUCCESS"
+        }
+    } catch {
+        Write-Log "Could not verify .NET Framework version" "WARNING"
+    }
+    
+    # Check available memory
+    try {
+        $availableMemory = [math]::Round((Get-Counter "\Memory\Available MBytes").CounterSamples[0].CookedValue / 1024, 2)
+        if ($availableMemory -lt 1) {
+            $issues += "Low available memory: ${availableMemory}GB"
+        } else {
+            Write-Log "Available memory: ${availableMemory}GB" "SUCCESS"
+        }
+    } catch {
+        Write-Log "Could not check available memory" "WARNING"
+    }
+    
+    return $issues
 }
 
 function Test-SystemCompatibility {
@@ -65,7 +172,7 @@ function Test-SystemCompatibility {
     }
     
     # Check current Windows version
-    try {
+    Invoke-SafeOperation -Operation "Windows Version Check" -ScriptBlock {
         $OS = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -ErrorAction Stop
         $currentBuild = [int]$OS.CurrentBuild
         
@@ -80,13 +187,15 @@ function Test-SystemCompatibility {
             $compatibility.Issues += "Windows 10 build too old (minimum 1903/18362 required)"
             $compatibility.Compatible = $false
         }
-    } catch {
+    } -ErrorMessage "Could not determine Windows version" -ContinueOnError $true
+    
+    if (-not $?) {
         $compatibility.Issues += "Unable to determine Windows version"
         $compatibility.Compatible = $false
     }
     
     # Check TPM
-    try {
+    Invoke-SafeOperation -Operation "TPM Check" -ScriptBlock {
         $tpm = Get-WmiObject -Namespace "Root\CIMv2\Security\MicrosoftTpm" -Class Win32_Tpm -ErrorAction SilentlyContinue
         if ($tpm -and $tpm.IsEnabled_InitialValue) {
             Write-Log "TPM: Present and enabled (Version $($tpm.ManufacturerVersion))" "SUCCESS"
@@ -94,40 +203,66 @@ function Test-SystemCompatibility {
             $compatibility.Warnings += "TPM not detected or not enabled"
             Write-Log "TPM: Not detected or not enabled (will use registry bypass)" "WARNING"
         }
-    } catch {
+    } -ErrorMessage "Error checking TPM status" -ContinueOnError $true
+    
+    if (-not $?) {
         $compatibility.Warnings += "Could not check TPM status"
     }
     
     # Check CPU architecture
-    $cpu = Get-WmiObject -Class Win32_Processor | Select-Object -First 1
-    if ($cpu.Architecture -ne 9) {  # 9 = x64
-        $compatibility.Issues += "CPU architecture not supported (x64 required)"
+    Invoke-SafeOperation -Operation "CPU Architecture Check" -ScriptBlock {
+        $cpu = Get-WmiObject -Class Win32_Processor -ErrorAction Stop | Select-Object -First 1
+        if ($cpu.Architecture -ne 9) {  # 9 = x64
+            $compatibility.Issues += "CPU architecture not supported (x64 required)"
+            $compatibility.Compatible = $false
+        } else {
+            Write-Log "CPU: $($cpu.Name) (x64)" "SUCCESS"
+        }
+    } -ErrorMessage "Error checking CPU architecture" -ContinueOnError $true
+    
+    if (-not $?) {
+        $compatibility.Issues += "Unable to determine CPU architecture"
         $compatibility.Compatible = $false
-    } else {
-        Write-Log "CPU: $($cpu.Name) (x64)" "SUCCESS"
     }
     
     # Check RAM
-    $ramGB = [math]::Round((Get-WmiObject -Class Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 2)
-    if ($ramGB -lt 4) {
-        $compatibility.Issues += "Insufficient RAM: ${ramGB}GB (4GB minimum required)"
-        $compatibility.Compatible = $false
-    } else {
-        Write-Log "RAM: ${ramGB}GB" "SUCCESS"
+    Invoke-SafeOperation -Operation "RAM Check" -ScriptBlock {
+        $ramGB = [math]::Round((Get-WmiObject -Class Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB, 2)
+        if ($ramGB -lt 4) {
+            $compatibility.Issues += "Insufficient RAM: ${ramGB}GB (4GB minimum required)"
+            $compatibility.Compatible = $false
+        } else {
+            Write-Log "RAM: ${ramGB}GB" "SUCCESS"
+        }
+    } -ErrorMessage "Error checking RAM" -ContinueOnError $true
+    
+    if (-not $?) {
+        $compatibility.Warnings += "Could not verify RAM amount"
     }
     
     # Check disk space
-    $systemDrive = Get-WmiObject -Class Win32_LogicalDisk | Where-Object { $_.DeviceID -eq $env:SystemDrive }
-    $freeSpaceGB = [math]::Round($systemDrive.FreeSpace / 1GB, 2)
-    if ($freeSpaceGB -lt 64) {
-        $compatibility.Issues += "Insufficient disk space: ${freeSpaceGB}GB free (64GB minimum required)"
+    Invoke-SafeOperation -Operation "Disk Space Check" -ScriptBlock {
+        $systemDrive = Get-WmiObject -Class Win32_LogicalDisk -ErrorAction Stop | Where-Object { $_.DeviceID -eq $env:SystemDrive }
+        if (-not $systemDrive) {
+            throw "System drive not found"
+        }
+        
+        $freeSpaceGB = [math]::Round($systemDrive.FreeSpace / 1GB, 2)
+        if ($freeSpaceGB -lt 64) {
+            $compatibility.Issues += "Insufficient disk space: ${freeSpaceGB}GB free (64GB minimum required)"
+            $compatibility.Compatible = $false
+        } else {
+            Write-Log "Disk Space: ${freeSpaceGB}GB free on $($systemDrive.DeviceID)" "SUCCESS"
+        }
+    } -ErrorMessage "Error checking disk space" -ContinueOnError $true
+    
+    if (-not $?) {
+        $compatibility.Issues += "Unable to verify disk space"
         $compatibility.Compatible = $false
-    } else {
-        Write-Log "Disk Space: ${freeSpaceGB}GB free on $($systemDrive.DeviceID)" "SUCCESS"
     }
     
     # Check Secure Boot (if available)
-    try {
+    Invoke-SafeOperation -Operation "Secure Boot Check" -ScriptBlock {
         $secureBoot = Confirm-SecureBootUEFI -ErrorAction SilentlyContinue
         if ($secureBoot) {
             Write-Log "Secure Boot: Enabled" "SUCCESS"
@@ -135,7 +270,9 @@ function Test-SystemCompatibility {
             $compatibility.Warnings += "Secure Boot not enabled"
             Write-Log "Secure Boot: Not enabled (recommended for Windows 11)" "WARNING"
         }
-    } catch {
+    } -ErrorMessage "Error checking Secure Boot" -ContinueOnError $true
+    
+    if (-not $?) {
         $compatibility.Warnings += "Could not check Secure Boot status"
     }
     
@@ -213,40 +350,58 @@ if ($IsInteractive -and -not $RunningFromOneLiner) {
     $KeepOpen = $true  # Auto-enable for interactive sessions
 }
 
-# Step 1: Initialize
-$CurrentStep++
-Update-Progress "Windows 11 Upgrade" "Initializing upgrade process..." $CurrentStep
+# Main script execution with comprehensive error handling
+try {
+    # Step 1: Initialize
+    $CurrentStep++
+    Update-Progress "Windows 11 Upgrade" "Initializing upgrade process..." $CurrentStep
 
-# Check if running as Administrator
-$IsAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-
-if (-not $IsAdmin) {
-    Write-Warning "⚠️  This script requires Administrator privileges to modify registry keys."
-    Write-Host "Please run PowerShell as Administrator and try again." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "Right-click PowerShell → 'Run as Administrator'" -ForegroundColor Cyan
-    
-    if ($KeepOpen) {
-        Write-Host ""
-        Write-Host "Press any key to close this window..." -ForegroundColor Yellow
-        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    # Check prerequisites
+    $prereqIssues = Test-Prerequisites
+    if ($prereqIssues.Count -gt 0) {
+        Write-Log "PREREQUISITE ISSUES FOUND:" "WARNING"
+        foreach ($issue in $prereqIssues) {
+            Write-Log "⚠️  $issue" "WARNING"
+        }
+        Write-Log "Script will continue but may encounter issues" "WARNING"
     }
-    exit 1
-}
 
-Write-Host "✅ Running with Administrator privileges" -ForegroundColor Green
+    # Check if running as Administrator
+    $IsAdmin = Invoke-SafeOperation -Operation "Administrator Check" -ScriptBlock {
+        ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } -ContinueOnError $false
 
-# Create temp directory if needed
-if (-not (Test-Path $TempDir)) {
-    Write-Host "Creating temporary directory: $TempDir" -ForegroundColor Yellow
-    New-Item -Path $TempDir -ItemType Directory -Force | Out-Null
-} else {
-    Write-Host "Using existing temporary directory: $TempDir" -ForegroundColor Green
-}
+    if (-not $IsAdmin) {
+        Write-Warning "⚠️  This script requires Administrator privileges to modify registry keys."
+        Write-Host "Please run PowerShell as Administrator and try again." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "Right-click PowerShell → 'Run as Administrator'" -ForegroundColor Cyan
+        
+        if ($KeepOpen) {
+            Write-Host ""
+            Write-Host "Press any key to close this window..." -ForegroundColor Yellow
+            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
+        exit 1
+    }
 
-# Initialize log file
-"Windows 11 Upgrade Log - Started $(Get-Date)" | Out-File -FilePath $LogFile -Encoding UTF8
-Write-Log "Upgrade process initialized" "INFO"
+    Write-Host "✅ Running with Administrator privileges" -ForegroundColor Green
+
+    # Create temp directory with error handling
+    Invoke-SafeOperation -Operation "Temp Directory Creation" -ScriptBlock {
+        if (-not (Test-Path $TempDir)) {
+            Write-Host "Creating temporary directory: $TempDir" -ForegroundColor Yellow
+            New-Item -Path $TempDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        } else {
+            Write-Host "Using existing temporary directory: $TempDir" -ForegroundColor Green
+        }
+    } -ErrorMessage "Failed to create or access temporary directory" -ContinueOnError $false
+
+    # Initialize log file with error handling
+    Invoke-SafeOperation -Operation "Log File Initialization" -ScriptBlock {
+        "Windows 11 Upgrade Log - Started $(Get-Date)" | Out-File -FilePath $LogFile -Encoding UTF8 -ErrorAction Stop
+        Write-Log "Upgrade process initialized" "INFO"
+    } -ErrorMessage "Failed to initialize log file" -ContinueOnError $true
 
 # Step 2: System Compatibility Check
 $CurrentStep++
@@ -282,34 +437,46 @@ if ($compatibility.Warnings.Count -gt 0) {
 
 Write-Log "✅ System compatibility check passed" "SUCCESS"
  
-# ----- SET REGISTRY KEYS -----
-$CurrentStep++
-Update-Progress "Windows 11 Upgrade" "Configuring registry keys for upgrade compatibility..." $CurrentStep
+    # ----- SET REGISTRY KEYS -----
+    $CurrentStep++
+    Update-Progress "Windows 11 Upgrade" "Configuring registry keys for upgrade compatibility..." $CurrentStep
 
-$regItems = @(
-    @{Path="HKCU:\SOFTWARE\Microsoft\PCHC"; Name="UpgradeEligibility"; Description="User upgrade eligibility"},
-    @{Path="HKLM:\SOFTWARE\Microsoft\PCHC"; Name="UpgradeEligibility"; Description="System upgrade eligibility"},
-    @{Path="HKLM:\SYSTEM\Setup\MoSetup"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Description="TPM/CPU bypass"}
-)
+    $regItems = @(
+        @{Path="HKCU:\SOFTWARE\Microsoft\PCHC"; Name="UpgradeEligibility"; Description="User upgrade eligibility"},
+        @{Path="HKLM:\SOFTWARE\Microsoft\PCHC"; Name="UpgradeEligibility"; Description="System upgrade eligibility"},
+        @{Path="HKLM:\SYSTEM\Setup\MoSetup"; Name="AllowUpgradesWithUnsupportedTPMOrCPU"; Description="TPM/CPU bypass"}
+    )
 
-Write-Log "Configuring registry keys for compatibility bypass..." "INFO"
- 
-foreach ($item in $regItems) {
-    Write-Log "Setting registry key: $($item.Description)" "INFO"
-    try {
-        if (-not (Test-Path $item.Path)) {
-            New-Item -Path $item.Path -Force | Out-Null
-            Write-Log "Created registry path: $($item.Path)" "SUCCESS"
+    Write-Log "Configuring registry keys for compatibility bypass..." "INFO"
+    $registryErrors = 0
+     
+    foreach ($item in $regItems) {
+        Write-Log "Setting registry key: $($item.Description)" "INFO"
+        
+        $success = Invoke-SafeOperation -Operation "Registry Key: $($item.Path)\$($item.Name)" -ScriptBlock {
+            # Check if registry path exists, create if needed
+            if (-not (Test-Path $item.Path)) {
+                New-Item -Path $item.Path -Force -ErrorAction Stop | Out-Null
+                Write-Log "Created registry path: $($item.Path)" "SUCCESS"
+            }
+            
+            # Set the registry value
+            New-ItemProperty -Path $item.Path -Name $item.Name -Value 1 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+            Write-Log "Set $($item.Path)\$($item.Name) = 1" "SUCCESS"
+            return $true
+        } -ErrorMessage "Failed to set registry key" -ContinueOnError $true
+        
+        if (-not $success) {
+            $registryErrors++
+            Write-Log "This may affect upgrade compatibility on unsupported hardware." "WARNING"
         }
-        New-ItemProperty -Path $item.Path -Name $item.Name -Value 1 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
-        Write-Log "Set $($item.Path)\$($item.Name) = 1" "SUCCESS"
-    } catch {
-        Write-Log "Failed to set $($item.Path)\$($item.Name): $($_.Exception.Message)" "ERROR"
-        Write-Log "This may affect upgrade compatibility on unsupported hardware." "WARNING"
     }
-}
- 
-# ----- DOWNLOAD INSTALLER -----
+    
+    if ($registryErrors -gt 0) {
+        Write-Log "⚠️  $registryErrors registry key(s) failed to set. Upgrade may fail on incompatible hardware." "WARNING"
+    } else {
+        Write-Log "✅ All registry keys configured successfully" "SUCCESS"
+    }# ----- DOWNLOAD INSTALLER -----
 $CurrentStep++
 Update-Progress "Windows 11 Upgrade" "Downloading Windows 11 Installation Assistant..." $CurrentStep
 
@@ -709,20 +876,82 @@ if (Test-Path $LogFile) {
     Write-Log "This may indicate the installer failed to start properly" "WARNING"
 }
 
-# Summary
-Write-Log "" "INFO"
-Write-Log "=== UPGRADE SUMMARY ===" "INFO"
-Write-Log "Start time: $startTime" "INFO"
-Write-Log "End time: $(Get-Date)" "INFO"
-Write-Log "Total duration: $([math]::Round($totalTime.TotalMinutes, 1)) minutes" "INFO"
-Write-Log "Final result: $(if($process.ExitCode -eq 0 -or $process.ExitCode -eq 8){'SUCCESS'}else{'FAILURE'})" "INFO"
+    # Summary
+    Write-Log "" "INFO"
+    Write-Log "=== UPGRADE SUMMARY ===" "INFO"
+    Write-Log "Start time: $startTime" "INFO"
+    Write-Log "End time: $(Get-Date)" "INFO"
+    Write-Log "Total duration: $([math]::Round($totalTime.TotalMinutes, 1)) minutes" "INFO"
+    Write-Log "Final result: $(if($process.ExitCode -eq 0 -or $process.ExitCode -eq 8){'SUCCESS'}else{'FAILURE'})" "INFO"
+    Write-Log "Errors encountered: $script:ErrorCount" "INFO"
+    Write-Log "Warnings encountered: $script:WarningCount" "INFO"
 
-# Keep window open if requested or running interactively
+    # Set final exit code
+    $script:ExitCode = $process.ExitCode
+
+} catch {
+    # Global error handler
+    Write-Log "CRITICAL ERROR: Script execution failed unexpectedly" "ERROR"
+    Write-ErrorLog -Operation "Main Script Execution" -ErrorRecord $_ -AdditionalInfo "Script terminated due to unhandled exception"
+    
+    # Complete progress bar if it's still running
+    if ($ShowProgress) {
+        Write-Progress -Activity "Windows 11 Upgrade" -Completed
+    }
+    
+    # Emergency cleanup
+    try {
+        if ($monitoringJob) {
+            Stop-Job $monitoringJob -ErrorAction SilentlyContinue
+            Remove-Job $monitoringJob -ErrorAction SilentlyContinue
+            Write-Log "Emergency cleanup: Background monitoring stopped" "INFO"
+        }
+    } catch {
+        # Ignore cleanup errors
+    }
+    
+    $script:ExitCode = 99  # Unhandled exception exit code
+    
+} finally {
+    # Final cleanup and summary
+    try {
+        Write-Log "" "INFO"
+        Write-Log "=== FINAL CLEANUP ===" "INFO"
+        
+        # Log final statistics
+        Write-Log "Script completed with exit code: $script:ExitCode" "INFO"
+        Write-Log "Total errors: $script:ErrorCount" "INFO"
+        Write-Log "Total warnings: $script:WarningCount" "INFO"
+        
+        # Check for temporary files that should be cleaned up
+        if (Test-Path $Installer) {
+            try {
+                $fileAge = (Get-Date) - (Get-Item $Installer).LastWriteTime
+                if ($fileAge.TotalHours -gt 24) {
+                    Write-Log "Installer file is over 24 hours old, consider cleaning up: $Installer" "INFO"
+                }
+            } catch {
+                # Ignore file age check errors
+            }
+        }
+        
+        # Final log entry
+        Write-Log "Windows 11 Upgrade script completed at $(Get-Date)" "INFO"
+        
+    } catch {
+        # Ignore final cleanup errors
+    }
+}# Keep window open if requested or running interactively
 if ($KeepOpen) {
     Write-Host ""
     Write-Host "Press any key to close this window..." -ForegroundColor Yellow
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    try {
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    } catch {
+        # Ignore input errors
+        Start-Sleep 2
+    }
 }
  
 # Return installer exit code to RMM
-exit $process.ExitCode
+exit $script:ExitCode
