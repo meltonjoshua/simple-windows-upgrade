@@ -15,11 +15,8 @@ param(
     [switch]$ForceRestart,
     [switch]$AutomaticMode,
     [switch]$KeepOpen,
-    [switch]$ShowProgress = $true
+    [switch]$ShowProgress
 )
-
-# FORCE BYPASS ALL HEALTH CHECKS - Always skip for maximum speed
-$SkipHealthCheck = $true
 
 # Configuration
 $TempDir = "C:\Temp"
@@ -570,7 +567,6 @@ if ($AutomaticMode) {
 }
 
 # FORCE BYPASS ALL HEALTH CHECKS - Maximum Speed Mode
-$SkipHealthCheck = $true
 Write-Log "⚡ FORCE BYPASS: All health checks disabled for maximum speed" "INFO"
 
 # ============================================================================
