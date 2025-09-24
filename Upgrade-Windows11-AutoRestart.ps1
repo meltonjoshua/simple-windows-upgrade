@@ -365,10 +365,35 @@ try {
         @{ Path = "HKLM:\SYSTEM\Setup\MoSetup"; Name = "AllowUpgradesWithUnsupportedTPMOrCPU"; Description = "Installation Assistant bypass" },
         @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate"; Name = "AllowUpgradesWithUnsupportedTPMOrCPU"; Description = "Windows Update bypass" },
         
-        # PC Health Check app bypasses
+        # PC Health Check app bypasses (comprehensive)
         @{ Path = "HKLM:\SOFTWARE\Microsoft\PCHC"; Name = "PreviousUninstall"; Description = "Bypass PC Health Check previous uninstall detection" },
         @{ Path = "HKLM:\SOFTWARE\Microsoft\PCHealthCheck"; Name = "installed"; Value = 0; Description = "Disable PC Health Check app detection" },
         @{ Path = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\PCHealthCheck"; Name = "installed"; Value = 0; Description = "Disable PC Health Check app detection (32-bit)" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\PCHealthCheck"; Name = "DisableHealthCheck"; Description = "Disable PC Health Check functionality" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\PCHealthCheck"; Name = "SkipHealthCheck"; Description = "Skip PC Health Check execution" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\PCHealthCheck"; Name = "BypassHealthCheck"; Description = "Bypass PC Health Check requirements" },
+        @{ Path = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\PCHealthCheck"; Name = "DisableHealthCheck"; Description = "Disable PC Health Check functionality (32-bit)" },
+        @{ Path = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\PCHealthCheck"; Name = "SkipHealthCheck"; Description = "Skip PC Health Check execution (32-bit)" },
+        @{ Path = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\PCHealthCheck"; Name = "BypassHealthCheck"; Description = "Bypass PC Health Check requirements (32-bit)" },
+        
+        # Windows Health Check service and component bypasses
+        @{ Path = "HKLM:\SYSTEM\CurrentControlSet\Services\PCHealthCheck"; Name = "Start"; Value = 4; Description = "Disable PC Health Check service (disabled)" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; Name = "PCHealthCheck"; Value = ""; Description = "Remove PC Health Check from startup" },
+        @{ Path = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"; Name = "PCHealthCheck"; Value = ""; Description = "Remove PC Health Check from startup (32-bit)" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows Health"; Name = "DisableHealthCheck"; Description = "Disable Windows Health checking" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows Health"; Name = "BypassCompatibilityCheck"; Description = "Bypass compatibility checking via Windows Health" },
+        
+        # Windows 11 readiness and health check bypasses
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"; Name = "PCHealthCheck.exe"; Value = "RUNASADMIN DISABLETHEMES"; Description = "Force PC Health Check compatibility mode" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppCompatFlags\Layers"; Name = "Windows11InstallationAssistant.exe"; Value = "RUNASADMIN DISABLETHEMES WIN8RTM"; Description = "Force Installation Assistant compatibility" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\HealthCheck"; Name = "DisableHealthCheck"; Description = "Group policy disable health check" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\HealthCheck"; Name = "BypassHealthCheck"; Description = "Group policy bypass health check" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\PCHealthCheck"; Name = "DisableApplication"; Description = "Group policy disable PC Health Check app" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\PCHealthCheck"; Name = "PreventExecution"; Description = "Group policy prevent PC Health Check execution" },
+        
+        # Microsoft Store and app deployment health check bypasses
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications"; Name = "Microsoft.PCHealthCheck_8wekyb3d8bbwe"; Value = ""; Description = "Remove PC Health Check from app store registry" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModel\StateRepository\Cache\Application\Data"; Name = "PCHealthCheck"; Value = 0; Description = "Disable PC Health Check app model cache" },
         
         # Windows 11 compatibility bypasses
         @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"; Name = "EditionID"; Value = "Professional"; Description = "Force Professional edition detection" },
@@ -637,8 +662,20 @@ try {
             $env:WINDOWS_SETUP_SKIP_COMPAT = "1"
             $env:SETUP_SKIP_COMPAT_CHECK = "1"
             $env:ALLOW_UNSUPPORTED_HARDWARE = "1"
+            
+            # PC Health Check app specific environment bypasses
             $env:PCHEALTHCHECK_BYPASS = "1"
             $env:SKIP_HEALTHCHECK = "1"
+            $env:DISABLE_PCHEALTHCHECK = "1"
+            $env:PCHEALTHCHECK_DISABLE = "1"
+            $env:SKIP_PC_HEALTH_CHECK = "1"
+            $env:BYPASS_PC_HEALTH_CHECK = "1"
+            $env:IGNORE_HEALTH_CHECK = "1"
+            $env:HEALTHCHECK_SKIP = "1"
+            $env:NO_HEALTH_CHECK = "1"
+            $env:WINDOWS_HEALTH_DISABLE = "1"
+            $env:MICROSOFT_HEALTHCHECK_BYPASS = "1"
+            $env:PCHEALTH_BYPASS_ALL = "1"
             
             # Disable Windows Defender interference
             $env:WINDOWS_DEFENDER_DISABLE = "1"
@@ -648,7 +685,7 @@ try {
             $env:FORCE_UPGRADE_COMPAT = "1"
             $env:LEGACY_HARDWARE_SUPPORT = "1"
             
-            Write-Log "✅ Set 16 environment variable bypasses" "SUCCESS"
+            Write-Log "✅ Set 26 environment variable bypasses (including 12 PC Health Check specific)" "SUCCESS"
         } catch {
             Write-Log "⚠️  Some environment variables failed to set: $($_.Exception.Message)" "WARNING"
         }
