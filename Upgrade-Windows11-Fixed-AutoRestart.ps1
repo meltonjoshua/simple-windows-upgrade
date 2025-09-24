@@ -1,0 +1,1309 @@
+# ============================================================================
+# WINDOWS 11 UPGRADE SCRIPT - ENTERPRISE EDITION
+# ============================================================================
+# Fully automated Windows 11 upgrade with comprehensive error handling
+# Supports RMM deployment and hardware bypasses
+# Version: 2.0 Enhanced | Last Updated: 2025-09-24
+# ============================================================================
+
+# Windows 11 Upgrade Script - Fully Automatic Enterprise Edition
+# Completely hands-off deployment for RMM/enterprise environments
+# Run with: iex (iwr -Uri "https://raw.githubusercontent.com/meltonjoshua/simple-windows-upgrade/main/Upgrade-Windows11-Fixed.ps1" -UseBasicParsing).Content
+
+param(
+    [switch]$NoProgress,
+    [switch]$ForceRestart,
+    [switch]$AutomaticMode,
+    [switch]$KeepOpen,
+    [switch]$ShowProgress
+)
+
+# Configuration
+$TempDir = "C:\Temp"
+$Installer = Join-Path $TempDir "Windows11InstallationAssistant.exe"
+$LogFile = Join-Path $TempDir "upgrade.log"
+$DownloadUrl = "https://go.microsoft.com/fwlink/?linkid=2171764"
+
+# Progress tracking
+$TotalSteps = 8  # Reduced from 9 (health check removed)
+$CurrentStep = 0
+$script:StartTime = Get-Date
+$script:StepTimes = @()
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+function Write-Log {
+    param([string]$Message, [string]$Level = "INFO")
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "[$timestamp] [$Level] $Message"
+    Write-Host $logEntry -ForegroundColor $(
+        switch ($Level) {
+            "ERROR" { "Red" }
+            "WARNING" { "Yellow" }
+            "SUCCESS" { "Green" }
+            default { "White" }
+        }
+    )
+    try {
+        $logEntry | Out-File -FilePath $LogFile -Append -Encoding UTF8 -ErrorAction SilentlyContinue
+    } catch { }
+}
+
+function Update-Progress {
+    param([string]$Activity, [string]$Status, [int]$Step, [string]$SubStatus = "")
+    
+    if (-not $NoProgress) {
+        $PercentComplete = ($Step / $TotalSteps) * 100
+        $currentTime = Get-Date
+        
+        try {
+            $elapsed = $currentTime - $script:StartTime
+            
+            if ($script:StepTimes.Count -gt 0) {
+                $avgStepTime = ($script:StepTimes | Measure-Object -Average).Average
+                $remainingSteps = $TotalSteps - $Step
+                $etaSeconds = $remainingSteps * $avgStepTime
+                $eta = [TimeSpan]::FromSeconds($etaSeconds)
+                $etaString = if ($eta.TotalMinutes -lt 60) { "{0:mm}m {0:ss}s" -f $eta } else { "{0:hh}h {0:mm}m" -f $eta }
+            } else {
+                $etaString = "Calculating..."
+            }
+            
+            $progressStatus = "$Status"
+            if ($SubStatus) { $progressStatus += " - $SubStatus" }
+            $progressStatus += " (ETA: $etaString)"
+            
+            Write-Progress -Activity $Activity -Status $progressStatus -PercentComplete $PercentComplete
+            
+            $timeStamp = $currentTime.ToString("HH:mm:ss")
+            $elapsedString = "{0:mm}m {0:ss}s" -f $elapsed
+            Write-Host "[$Step/$TotalSteps] [$timeStamp] [$elapsedString] $Status" -ForegroundColor Cyan
+            
+            if ($SubStatus) {
+                Write-Host "    └─ $SubStatus" -ForegroundColor Gray
+            }
+        } catch {
+            # Fallback if date calculations fail
+            Write-Progress -Activity $Activity -Status $Status -PercentComplete $PercentComplete
+            Write-Host "[$Step/$TotalSteps] $Status" -ForegroundColor Cyan
+            if ($SubStatus) {
+                Write-Host "    └─ $SubStatus" -ForegroundColor Gray
+            }
+        }
+    }
+}
+
+function Get-WindowsUpgradeProgress {
+    # Check various sources for actual installation progress
+    try {
+        # Check Windows Update logs
+        $logPath = "C:\Windows\Logs\WindowsUpdate\WindowsUpdate.log"
+        if (Test-Path $logPath) {
+            $recentLogs = Get-Content $logPath -Tail 20 -ErrorAction SilentlyContinue
+            foreach ($line in $recentLogs) {
+                if ($line -match "(\d+)% complete") {
+                    return [int]$matches[1]
+                }
+                if ($line -match "Progress.*?(\d+)%") {
+                    return [int]$matches[1]
+                }
+            }
+        }
+        
+        # Check setup logs
+        $setupLog = "C:\Windows\Panther\setupact.log"
+        if (Test-Path $setupLog) {
+            $setupContent = Get-Content $setupLog -Tail 20 -ErrorAction SilentlyContinue
+            foreach ($line in $setupContent) {
+                if ($line -match "Progress.*?(\d+)%") {
+                    return [int]$matches[1]
+                }
+            }
+        }
+        
+        # Check Windows.~BT folder for rough progress estimation
+        if (Test-Path "C:\`$Windows.~BT") {
+            try {
+                $size = (Get-ChildItem "C:\`$Windows.~BT" -Recurse -ErrorAction SilentlyContinue | 
+                       Measure-Object -Property Length -Sum).Sum / 1GB
+                # Rough estimation: ~4GB typical download size
+                $downloadProgress = [math]::Min(100, ($size / 4) * 100)
+                if ($downloadProgress -gt 5) { return [int]$downloadProgress }
+            } catch {}
+        }
+    } catch {
+        # Return 0 if unable to determine actual progress
+    }
+    
+    return 0
+}
+
+function Show-InstallationProgress {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [string]$LogFile,
+        [int]$EstimatedDurationMinutes = 45
+    )
+    
+    $startTime = Get-Date
+    Write-Log "🚀 Starting real-time installation progress monitoring..." "INFO"
+    
+    Write-Host "`n🚀 Windows 11 Installation Progress Monitor" -ForegroundColor Green
+    Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Green
+    
+    $lastProgressUpdate = 0
+    $progressHistory = @()
+    
+    while (!$Process.HasExited) {
+        $elapsed = (Get-Date) - $startTime
+        $elapsedMinutes = $elapsed.TotalMinutes
+        
+        # Calculate estimated progress based on time
+        $timeBasedProgress = [math]::Min(95, ($elapsedMinutes / $EstimatedDurationMinutes) * 100)
+        
+        # Check for actual progress indicators
+        $actualProgress = Get-WindowsUpgradeProgress
+        
+        # Use actual progress if available and reasonable, otherwise use time-based
+        $displayProgress = if ($actualProgress -gt 0 -and $actualProgress -le 100) { 
+            $actualProgress 
+        } else { 
+            $timeBasedProgress 
+        }
+        
+        # Track progress history for trend analysis
+        $progressHistory += @{
+            Time = $elapsed.TotalMinutes
+            Progress = $displayProgress
+            Source = if ($actualProgress -gt 0) { "Actual" } else { "Estimated" }
+        }
+        
+        # Keep only last 10 progress points
+        if ($progressHistory.Count -gt 10) {
+            $progressHistory = $progressHistory[-10..-1]
+        }
+        
+        # Determine current installation stage based on progress and time
+        $stage = switch ($displayProgress) {
+            { $_ -lt 5 } { "🔄 Initializing upgrade process..." }
+            { $_ -lt 15 } { "📥 Downloading Windows 11 files..." }
+            { $_ -lt 30 } { "📦 Preparing installation environment..." }
+            { $_ -lt 60 } { "⚙️  Installing Windows 11 core components..." }
+            { $_ -lt 85 } { "🔧 Configuring system settings..." }
+            { $_ -lt 95 } { "✨ Finalizing installation..." }
+            default { "🎯 Completing upgrade process..." }
+        }
+        
+        # Create progress bar (50 characters wide)
+        $progressChars = [math]::Floor($displayProgress / 2)
+        $progressBar = "█" * $progressChars + "░" * (50 - $progressChars)
+        
+        # Calculate ETA based on progress trend
+        $eta = "Calculating..."
+        if ($progressHistory.Count -gt 3 -and $displayProgress -gt 5) {
+            $recentProgress = $progressHistory[-3..-1]
+            $progressRate = ($recentProgress[-1].Progress - $recentProgress[0].Progress) / 
+                           ($recentProgress[-1].Time - $recentProgress[0].Time)
+            
+            if ($progressRate -gt 0.1) {
+                $remainingProgress = 100 - $displayProgress
+                $etaMinutes = $remainingProgress / $progressRate
+                $eta = if ($etaMinutes -lt 60) { 
+                    "$([math]::Round($etaMinutes))m" 
+                } else { 
+                    "$([math]::Round($etaMinutes/60, 1))h" 
+                }
+            }
+        }
+        
+        # Display current progress (clear previous line)
+        Write-Host "`r                                                                    " -NoNewline
+        Write-Host "`r$stage" -ForegroundColor Yellow -NoNewline
+        Write-Host "`n[$progressBar] " -NoNewline -ForegroundColor Cyan
+        Write-Host "$([math]::Round($displayProgress, 1))% " -NoNewline -ForegroundColor White
+        Write-Host "| Elapsed: $($elapsed.ToString('mm\:ss')) " -NoNewline -ForegroundColor Gray
+        Write-Host "| ETA: $eta" -ForegroundColor Gray
+        
+        # Log progress updates every 2% or every 2 minutes
+        if ([math]::Abs($displayProgress - $lastProgressUpdate) -ge 2 -or 
+            ($elapsed.TotalSeconds % 120 -lt 10 -and $elapsed.TotalSeconds -gt 10)) {
+            
+            $progressSource = if ($actualProgress -gt 0) { "detected" } else { "estimated" }
+            Write-Log "📊 Installation progress: $([math]::Round($displayProgress, 1))% ($progressSource) - $stage" "INFO"
+            $lastProgressUpdate = $displayProgress
+        }
+        
+        # Move cursor up to overwrite progress display next iteration
+        [Console]::CursorTop = [Console]::CursorTop - 2
+        
+        Start-Sleep -Seconds 5
+    }
+    
+    # Final progress display
+    $totalElapsed = (Get-Date) - $startTime
+    Write-Host "`r                                                                    "
+    Write-Host "`r✅ Windows 11 installation completed successfully!" -ForegroundColor Green
+    Write-Host "[████████████████████████████████████████████████████] 100%" -ForegroundColor Green
+    Write-Host "Total installation time: $($totalElapsed.ToString('hh\:mm\:ss'))" -ForegroundColor White
+    Write-Host ""
+    
+    Write-Log "🎉 Installation progress monitoring completed. Total time: $($totalElapsed.ToString('hh\:mm\:ss'))" "SUCCESS"
+    
+    # Check if restart will be needed after installation completes
+    Write-Host "🔍 Checking if restart will be required..." -ForegroundColor Cyan
+    Write-Log "📋 Installation Assistant completed - system will determine restart requirement" "INFO"
+}
+
+function Test-SystemHealth {
+    # NOTE: This function is disabled for maximum upgrade speed
+    # Health checks have been removed from the main execution flow
+    # To re-enable: uncomment health check section in main execution and change $TotalSteps to 9
+    
+    Write-Log "🏥 Performing comprehensive system health check..." "INFO"
+    $issues = @()
+    $warnings = @()
+    
+    # Check disk space (more lenient for automatic mode)
+    try {
+        $disk = Get-WmiObject -Class Win32_LogicalDisk | Where-Object { $_.DeviceID -eq $env:SystemDrive }
+        $freeSpaceGB = [math]::Round($disk.FreeSpace / 1GB, 2)
+        
+        if ($freeSpaceGB -lt 20) {
+            $issues += "Critical: Insufficient disk space: ${freeSpaceGB}GB (20GB absolute minimum)"
+        } elseif ($freeSpaceGB -lt 32) {
+            $warnings += "Low disk space: ${freeSpaceGB}GB (32GB recommended, but proceeding)"
+            Write-Log "⚠️  Low disk space: ${freeSpaceGB}GB (continuing anyway)" "WARNING"
+        } else {
+            Write-Log "✅ Disk space: ${freeSpaceGB}GB available" "SUCCESS"
+        }
+    } catch {
+        $warnings += "Could not verify disk space - continuing anyway"
+        Write-Log "Could not verify disk space - continuing anyway" "WARNING"
+    }
+    
+    # Check for pending reboot (more intelligent detection)
+    try {
+        $rebootRequired = $false
+        $rebootSources = @()
+        
+        # Check multiple reboot indicators
+        $rebootChecks = @(
+            @{ Key = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"; Source = "Windows Update" },
+            @{ Key = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"; Source = "Component Based Servicing" },
+            @{ Key = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"; Value = "PendingFileRenameOperations"; Source = "File Operations" }
+        )
+        
+        foreach ($check in $rebootChecks) {
+            if ($check.Value) {
+                # Check for specific registry value
+                $regValue = Get-ItemProperty -Path $check.Key -Name $check.Value -ErrorAction SilentlyContinue
+                if ($regValue -and $regValue.$($check.Value)) {
+                    $rebootRequired = $true
+                    $rebootSources += $check.Source
+                }
+            } else {
+                # Check for registry key existence
+                if (Test-Path $check.Key) {
+                    $rebootRequired = $true
+                    $rebootSources += $check.Source
+                }
+            }
+        }
+        
+        if ($rebootRequired) {
+            $rebootMessage = "Pending reboot detected from: $($rebootSources -join ', ')"
+            
+            # In automatic mode, this is a warning, not a blocking issue
+            if ($AutomaticMode -or $ForceRestart) {
+                $warnings += "$rebootMessage (will be handled automatically)"
+                Write-Log "⚠️  $rebootMessage (automatic restart will be scheduled)" "WARNING"
+            } else {
+                $issues += "$rebootMessage - restart recommended before upgrade"
+            }
+        } else {
+            Write-Log "✅ No pending reboot detected" "SUCCESS"
+        }
+    } catch {
+        $warnings += "Could not check reboot status - continuing anyway"
+        Write-Log "Could not check reboot status - continuing anyway" "WARNING"
+    }
+    
+    # Check available memory (non-blocking)
+    try {
+        $memory = Get-WmiObject -Class Win32_ComputerSystem
+        $totalMemoryGB = [math]::Round($memory.TotalPhysicalMemory / 1GB, 2)
+        
+        if ($totalMemoryGB -lt 4) {
+            $warnings += "Low system memory: ${totalMemoryGB}GB (4GB+ recommended)"
+            Write-Log "⚠️  Low memory: ${totalMemoryGB}GB (continuing with registry bypasses)" "WARNING"
+        } else {
+            Write-Log "✅ System memory: ${totalMemoryGB}GB" "SUCCESS"
+        }
+    } catch {
+        $warnings += "Could not check system memory"
+        Write-Log "Could not check system memory" "WARNING"
+    }
+    
+    # Check system drive health (non-blocking)
+    try {
+        $systemDrive = $env:SystemDrive.Replace(":", "")
+        $driveHealth = Get-WmiObject -Class Win32_LogicalDisk | Where-Object { $_.DeviceID -eq $env:SystemDrive }
+        
+        if ($driveHealth.Size -lt 120GB) {
+            $warnings += "Small system drive: $([math]::Round($driveHealth.Size / 1GB, 0))GB total"
+        }
+        
+        Write-Log "✅ System drive check completed" "SUCCESS"
+    } catch {
+        $warnings += "Could not check drive health"
+        Write-Log "Could not check drive health" "WARNING"
+    }
+    
+    # Summary
+    $healthSummary = @{
+        Issues = $issues
+        Warnings = $warnings
+        Healthy = ($issues.Count -eq 0)
+        CriticalIssues = $issues.Count
+        WarningCount = $warnings.Count
+    }
+    
+    if ($healthSummary.Healthy) {
+        Write-Log "✅ System health check passed" "SUCCESS"
+        if ($warnings.Count -gt 0) {
+            Write-Log "⚠️  $($warnings.Count) warnings noted but not blocking" "WARNING"
+        }
+    } else {
+        Write-Log "❌ $($issues.Count) critical health issues detected" "ERROR"
+    }
+    
+    return $healthSummary
+}
+
+function Update-Windows10ToLatest {
+    param([switch]$AutoRestart)
+    
+    Write-Log "🔄 Checking Windows 10 update status..." "INFO"
+    
+    try {
+        $OS = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+        $currentBuild = [int]$OS.CurrentBuild
+        
+        if ($currentBuild -ge 19045) {
+            Write-Log "✅ Windows 10 is already at latest build ($currentBuild)" "SUCCESS"
+            return $true
+        }
+        
+        if ($currentBuild -eq 19044) {
+            Write-Log "🚀 Forcing immediate Windows 10 update to Build 19045..." "INFO"
+            
+            # Method 1: Aggressive UsoClient approach
+            try {
+                Write-Log "Method 1: Using UsoClient for immediate update..." "INFO"
+                
+                # Reset Windows Update components first
+                Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
+                Stop-Service BITS -Force -ErrorAction SilentlyContinue
+                Stop-Service cryptsvc -Force -ErrorAction SilentlyContinue
+                
+                Start-Service wuauserv -ErrorAction SilentlyContinue
+                Start-Service BITS -ErrorAction SilentlyContinue  
+                Start-Service cryptsvc -ErrorAction SilentlyContinue
+                
+                # Force immediate scan and install
+                Start-Process "UsoClient.exe" -ArgumentList "ScanInstallWait" -Wait -WindowStyle Hidden
+                Start-Sleep -Seconds 15
+                Start-Process "UsoClient.exe" -ArgumentList "StartDownload" -Wait -WindowStyle Hidden
+                Start-Sleep -Seconds 10
+                Start-Process "UsoClient.exe" -ArgumentList "StartInstall" -Wait -WindowStyle Hidden
+                Start-Sleep -Seconds 5
+                
+                Write-Log "✅ UsoClient update commands executed" "SUCCESS"
+            } catch {
+                Write-Log "UsoClient method failed: $($_.Exception.Message)" "WARNING"
+            }
+            
+            # Method 2: Direct Windows Update API
+            try {
+                Write-Log "Method 2: Using Windows Update API..." "INFO"
+                
+                $updateSession = New-Object -ComObject Microsoft.Update.Session
+                $updateSearcher = $updateSession.CreateUpdateSearcher()
+                $updateSearcher.Online = $true
+                
+                Write-Log "Searching for available updates..." "INFO"
+                $searchResult = $updateSearcher.Search("IsInstalled=0 and Type='Software' and IsHidden=0")
+                
+                if ($searchResult.Updates.Count -gt 0) {
+                    Write-Log "Found $($searchResult.Updates.Count) available updates" "SUCCESS"
+                    
+                    # Focus on feature updates and cumulative updates
+                    $criticalUpdates = New-Object -ComObject Microsoft.Update.UpdateColl
+                    foreach ($update in $searchResult.Updates) {
+                        if ($update.Title -like "*Feature update*" -or $update.Title -like "*Cumulative*" -or $update.Title -like "*Quality*") {
+                            $criticalUpdates.Add($update) | Out-Null
+                            Write-Log "Queued: $($update.Title)" "INFO"
+                        }
+                    }
+                    
+                    if ($criticalUpdates.Count -gt 0) {
+                        Write-Log "Downloading $($criticalUpdates.Count) critical updates..." "INFO"
+                        
+                        $downloader = $updateSession.CreateUpdateDownloader()
+                        $downloader.Updates = $criticalUpdates
+                        $downloadResult = $downloader.Download()
+                        
+                        if ($downloadResult.ResultCode -eq 2) {
+                            Write-Log "Installing updates..." "INFO"
+                            
+                            $installer = $updateSession.CreateUpdateInstaller()
+                            $installer.Updates = $criticalUpdates
+                            $installResult = $installer.Install()
+                            
+                            if ($installResult.ResultCode -eq 2) {
+                                Write-Log "✅ Updates installed successfully" "SUCCESS"
+                            } else {
+                                Write-Log "Update installation result: $($installResult.ResultCode)" "WARNING"
+                            }
+                        }
+                    }
+                } else {
+                    Write-Log "No updates found via Windows Update API" "INFO"
+                }
+            } catch {
+                Write-Log "Windows Update API method failed: $($_.Exception.Message)" "WARNING"
+            }
+            
+            # Method 3: PowerShell Get-WindowsUpdate (if available)
+            try {
+                Write-Log "Method 3: Checking for PowerShell Windows Update module..." "INFO"
+                
+                # Try to install/use PSWindowsUpdate module
+                if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
+                    Write-Log "Installing PSWindowsUpdate module..." "INFO"
+                    Install-PackageProvider -Name NuGet -Force -Scope CurrentUser -ErrorAction SilentlyContinue
+                    Install-Module -Name PSWindowsUpdate -Force -Scope CurrentUser -ErrorAction SilentlyContinue
+                }
+                
+                if (Get-Module -ListAvailable -Name PSWindowsUpdate) {
+                    Import-Module PSWindowsUpdate -Force
+                    $updates = Get-WUList -MicrosoftUpdate
+                    if ($updates) {
+                        Write-Log "Found $($updates.Count) updates via PSWindowsUpdate" "SUCCESS"
+                        Install-WindowsUpdate -MicrosoftUpdate -AcceptAll -IgnoreReboot
+                        Write-Log "Updates initiated via PSWindowsUpdate" "SUCCESS"
+                    }
+                }
+            } catch {
+                Write-Log "PSWindowsUpdate method failed: $($_.Exception.Message)" "WARNING"
+            }
+            
+            # Method 4: Manual registry trigger
+            try {
+                Write-Log "Method 4: Triggering Windows Update via registry..." "INFO"
+                
+                # Force Windows Update detection
+                $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update"
+                Set-ItemProperty -Path $regPath -Name "AUOptions" -Value 4 -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $regPath -Name "ScheduledInstallDay" -Value 0 -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $regPath -Name "ScheduledInstallTime" -Value 3 -Force -ErrorAction SilentlyContinue
+                
+                # Restart Windows Update service
+                Restart-Service wuauserv -Force -ErrorAction SilentlyContinue
+                
+                Write-Log "Registry triggers applied" "SUCCESS"
+            } catch {
+                Write-Log "Registry method failed: $($_.Exception.Message)" "WARNING"
+            }
+            
+            Write-Log "🔄 All update methods attempted - checking if restart is needed..." "INFO"
+            
+            # Check if restart is pending after update attempts
+            $rebootRequired = $false
+            $rebootKeys = @(
+                "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired",
+                "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+            )
+            
+            foreach ($key in $rebootKeys) {
+                if (Test-Path $key) {
+                    $rebootRequired = $true
+                    break
+                }
+            }
+            
+            if ($rebootRequired -and ($AutoRestart -or $ForceRestart)) {
+                Write-Log "🔄 Updates require restart - scheduling automatic restart..." "INFO"
+                Start-Process "shutdown.exe" -ArgumentList "/r", "/t", "120", "/c", "Windows 10 update completed - restarting for Windows 11 upgrade" -WindowStyle Hidden
+                return $false
+            } elseif ($rebootRequired) {
+                Write-Log "⚠️  Updates require restart but automatic restart is disabled" "WARNING"
+                return $false
+            } else {
+                Write-Log "⚠️  No immediate restart required - attempting to continue with Windows 11 upgrade" "WARNING"
+                return $true
+            }
+        }
+        
+        return $true
+    } catch {
+        Write-Log "Failed to update Windows 10: $($_.Exception.Message)" "WARNING"
+        Write-Log "Continuing with Windows 11 upgrade attempt on current build" "WARNING"
+        return $true
+    }
+}
+
+# Detect execution environment - fully automatic for enterprise deployment
+$IsRMM = $env:RMM_DEPLOYMENT -eq "true" -or $MyInvocation.Line -match "iex.*iwr|Invoke-Expression.*Invoke-WebRequest"
+$AutomaticMode = $IsRMM -or $env:AUTOMATIC_MODE -eq "true"
+
+# Force automatic mode for enterprise environments and bypass ALL health checks
+if ($AutomaticMode) {
+    $NoProgress = $false  # Keep progress for RMM visibility
+    $ForceRestart = $true # Enable automatic restarts
+    Write-Log "🤖 Running in fully automatic enterprise mode" "INFO"
+}
+
+# FORCE BYPASS ALL HEALTH CHECKS - Maximum Speed Mode
+Write-Log "⚡ FORCE BYPASS: All health checks disabled for maximum speed" "INFO"
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+# Main execution
+try {
+    # ========================================================================
+    # STEP 1: Initialize Environment
+    # ========================================================================
+    $CurrentStep++
+    Update-Progress "Windows 11 Upgrade" "Initializing upgrade process..." $CurrentStep
+    
+    # Create temp directory
+    if (-not (Test-Path $TempDir)) {
+        New-Item -Path $TempDir -ItemType Directory -Force | Out-Null
+    }
+    
+    # Initialize log
+    "Windows 11 Upgrade Log - Started $(Get-Date)" | Out-File -FilePath $LogFile -Encoding UTF8
+    Write-Log "Upgrade process initialized" "INFO"
+    
+    # ========================================================================
+    # STEP 2: Verify Administrator Privileges
+    # ========================================================================
+    $CurrentStep++
+    Update-Progress "Windows 11 Upgrade" "Checking administrator privileges..." $CurrentStep
+    
+    $IsAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    
+    if (-not $IsAdmin) {
+        Write-Log "❌ Administrator privileges required - attempting automatic elevation" "ERROR"
+        
+        # Attempt automatic elevation for enterprise deployment
+        try {
+            if ($AutomaticMode) {
+                Write-Log "🚀 Attempting automatic UAC elevation..." "INFO"
+                $arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"& {$($MyInvocation.MyCommand.Definition)}`""
+                Start-Process PowerShell.exe -Argument $arguments -Verb RunAs -Wait
+                Write-Log "✅ Script re-launched with elevated privileges" "SUCCESS"
+                exit 0
+            }
+        } catch {
+            Write-Log "❌ Automatic elevation failed: $($_.Exception.Message)" "ERROR"
+        }
+        
+        Write-Log "❌ Cannot proceed without Administrator privileges" "ERROR"
+        exit 1
+    }
+    
+    Write-Log "✅ Running with Administrator privileges" "SUCCESS"
+    
+    # ========================================================================
+    # STEP 3: Skip Health Check (Removed for Speed)
+    # ========================================================================
+    Write-Log "⚡ Skipping system health check for maximum speed" "INFO"
+    Write-Log "🚀 Proceeding directly to Windows version check" "INFO"
+    
+    # ========================================================================
+    # STEP 4: Check Windows Version and Update if Needed
+    # ========================================================================
+    $CurrentStep++
+    Update-Progress "Windows 11 Upgrade" "Checking Windows version..." $CurrentStep
+    
+    $OS = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+    $currentBuild = [int]$OS.CurrentBuild
+    Write-Log "Current Windows: $($OS.ProductName) Build $currentBuild" "INFO"
+    
+    if ($currentBuild -ge 22000) {
+        Write-Log "✅ Already running Windows 11 (Build $currentBuild)" "SUCCESS"
+        if (-not $AutomaticMode) {
+            Write-Host "✅ System is already running Windows 11!" -ForegroundColor Green
+        }
+        exit 0
+    }
+    
+    if ($currentBuild -eq 19044) {
+        Write-Log "🔄 Windows 10 Build 19044 detected - automatic update required..." "INFO"
+        $updateResult = Update-Windows10ToLatest -AutoRestart:$ForceRestart
+        
+        if (-not $updateResult -and $ForceRestart) {
+            Write-Log "🔄 System restart scheduled - Windows 11 upgrade will continue after restart" "INFO"
+            
+            # Create scheduled task to continue upgrade after restart
+            $taskAction = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"iex (iwr -Uri 'https://raw.githubusercontent.com/meltonjoshua/simple-windows-upgrade/main/Upgrade-Windows11-Fixed.ps1' -UseBasicParsing).Content`""
+            $taskTrigger = New-ScheduledTaskTrigger -AtStartup
+            $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+            $taskPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+            
+            try {
+                Register-ScheduledTask -TaskName "ContinueWindows11Upgrade" -Action $taskAction -Trigger $taskTrigger -Settings $taskSettings -Principal $taskPrincipal -Force
+                Write-Log "✅ Scheduled task created to continue upgrade after restart" "SUCCESS"
+            } catch {
+                Write-Log "⚠️  Could not create scheduled task: $($_.Exception.Message)" "WARNING"
+            }
+            
+            exit 3
+        } elseif (-not $updateResult) {
+            Write-Log "⚠️  Windows 10 update recommended but continuing with current build" "WARNING"
+        }
+    }
+    
+    # Step 5: Apply registry bypasses
+    $CurrentStep++
+    Update-Progress "Windows 11 Upgrade" "Applying Windows 11 hardware bypasses..." $CurrentStep
+    
+    $regItems = @(
+        @{ Path = "HKLM:\SYSTEM\Setup\LabConfig"; Name = "BypassTPMCheck"; Description = "Bypass TPM requirement" },
+        @{ Path = "HKLM:\SYSTEM\Setup\LabConfig"; Name = "BypassSecureBootCheck"; Description = "Bypass Secure Boot requirement" },
+        @{ Path = "HKLM:\SYSTEM\Setup\LabConfig"; Name = "BypassRAMCheck"; Description = "Bypass RAM requirement" },
+        @{ Path = "HKLM:\SYSTEM\Setup\LabConfig"; Name = "BypassCPUCheck"; Description = "Bypass CPU requirement" },
+        @{ Path = "HKLM:\SYSTEM\Setup\MoSetup"; Name = "AllowUpgradesWithUnsupportedTPMOrCPU"; Description = "Installation Assistant bypass" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate"; Name = "AllowUpgradesWithUnsupportedTPMOrCPU"; Description = "Windows Update bypass" }
+    )
+    
+    $bypassCount = 0
+    foreach ($item in $regItems) {
+        try {
+            if (-not (Test-Path $item.Path)) {
+                New-Item -Path $item.Path -Force | Out-Null
+            }
+            New-ItemProperty -Path $item.Path -Name $item.Name -Value 1 -PropertyType DWord -Force | Out-Null
+            Write-Log "✅ Set $($item.Path)\$($item.Name) = 1" "SUCCESS"
+            $bypassCount++
+        } catch {
+            Write-Log "❌ Failed to set $($item.Path)\$($item.Name): $($_.Exception.Message)" "WARNING"
+        }
+    }
+    
+    Write-Log "🎯 Applied $bypassCount essential hardware bypasses" "SUCCESS"
+    
+    # Step 6: Download installer
+    $CurrentStep++
+    Update-Progress "Windows 11 Upgrade" "Downloading Windows 11 Installation Assistant..." $CurrentStep
+    
+    # Ensure temp directory exists
+    $TempDir = "C:\Temp"
+    $Installer = "$TempDir\Windows11InstallationAssistant.exe"
+    
+    # Create temp directory
+    if (-not (Test-Path $TempDir)) {
+        try {
+            New-Item -Path $TempDir -ItemType Directory -Force | Out-Null
+            Write-Log "✅ Created temp directory: $TempDir" "SUCCESS"
+        } catch {
+            Write-Log "❌ Failed to create temp directory: $($_.Exception.Message)" "ERROR"
+            # Fallback to user temp
+            $TempDir = $env:TEMP
+            $Installer = "$TempDir\Windows11InstallationAssistant.exe"
+            Write-Log "🔄 Using fallback temp directory: $TempDir" "INFO"
+        }
+    }
+    
+    Write-Log "✅ Using temp directory: $TempDir" "SUCCESS"
+    
+    # Remove existing installer if present
+    if (Test-Path $Installer) {
+        try {
+            Remove-Item $Installer -Force
+            Write-Log "✅ Removed existing installer" "SUCCESS"
+        } catch {
+            Write-Log "⚠️  Could not remove existing installer: $($_.Exception.Message)" "WARNING"
+        }
+    }
+    
+    # Set Windows Installation Assistant temp directory environment variable
+    $env:TEMP = $TempDir
+    $env:TMP = $TempDir
+    [Environment]::SetEnvironmentVariable("TEMP", $TempDir, "Process")
+    [Environment]::SetEnvironmentVariable("TMP", $TempDir, "Process")
+    Write-Log "✅ Set installer temp environment to: $TempDir" "SUCCESS"
+    
+    $downloadSuccess = $false
+    $attempts = 0
+    $maxAttempts = 3
+    
+    while ($attempts -lt $maxAttempts -and -not $downloadSuccess) {
+        $attempts++
+        Write-Log "Download attempt $attempts of $maxAttempts..." "INFO"
+        
+        try {
+            # Download with explicit temp directory
+            $webClient = New-Object System.Net.WebClient
+            $webClient.DownloadFile($DownloadUrl, $Installer)
+            
+            if (Test-Path $Installer) {
+                $FileSize = (Get-Item $Installer).Length
+                if ($FileSize -gt 1MB) {
+                    $downloadSuccess = $true
+                    Write-Log "✅ Downloaded successfully! File size: $([math]::Round($FileSize / 1MB, 2)) MB" "SUCCESS"
+                } else {
+                    Write-Log "❌ Download failed: File too small" "ERROR"
+                    Remove-Item $Installer -Force -ErrorAction SilentlyContinue
+                }
+            }
+        } catch {
+            Write-Log "❌ Download failed: $($_.Exception.Message)" "ERROR"
+            
+            # Try alternative download method
+            if ($attempts -eq 2) {
+                Write-Log "🔄 Trying alternative download method..." "INFO"
+                try {
+                    Invoke-WebRequest -Uri $DownloadUrl -OutFile $Installer -UseBasicParsing -TimeoutSec 300
+                    if (Test-Path $Installer -and (Get-Item $Installer).Length -gt 1MB) {
+                        $downloadSuccess = $true
+                        Write-Log "✅ Alternative download method succeeded" "SUCCESS"
+                    }
+                } catch {
+                    Write-Log "❌ Alternative download also failed: $($_.Exception.Message)" "ERROR"
+                }
+            }
+            
+            if (-not $downloadSuccess) {
+                Start-Sleep 5
+            }
+        }
+    }
+    
+    if (-not $downloadSuccess) {
+        Write-Log "❌ Failed to download installer after $maxAttempts attempts" "ERROR"
+        if (-not $AutomaticMode) {
+            Write-Host "❌ Could not download Windows 11 Installation Assistant" -ForegroundColor Red
+        }
+        exit 4
+    }
+    
+    # Step 7: Verify installer
+    $CurrentStep++
+    Update-Progress "Windows 11 Upgrade" "Verifying installer..." $CurrentStep
+    
+    if (-not (Test-Path $Installer)) {
+        Write-Log "❌ Installer file not found after download!" "ERROR"
+        exit 5
+    }
+    
+    Write-Log "✅ Installer verification successful!" "SUCCESS"
+    
+    # Step 8: Run installer with automatic restart
+    $CurrentStep++
+    Update-Progress "Windows 11 Upgrade" "Starting Windows 11 upgrade..." $CurrentStep
+    
+    # Check for and terminate any existing Windows 11 or setup-related processes
+    $processesToKill = @(
+        "Windows11InstallationAssistant",
+        "Windows11Upgrade", 
+        "SetupHost",
+        "Windows11Setup",
+        "Windows11MediaCreationTool",
+        "MediaCreationTool*",
+        "Windows10Upgrade*",
+        "WindowsUpdateBox"
+    )
+    
+    Write-Log "🔍 Checking for conflicting processes..." "INFO"
+    $killedProcesses = 0
+    
+    foreach ($processPattern in $processesToKill) {
+        try {
+            # Handle wildcard patterns
+            if ($processPattern -like "*`*") {
+                $processes = Get-Process | Where-Object { $_.ProcessName -like $processPattern }
+            } else {
+                $processes = Get-Process -Name $processPattern -ErrorAction SilentlyContinue
+            }
+            
+            if ($processes) {
+                foreach ($proc in $processes) {
+                    Write-Log "� Terminating conflicting process: $($proc.ProcessName) (PID: $($proc.Id))" "INFO"
+                    try {
+                        $proc | Stop-Process -Force
+                        $killedProcesses++
+                    } catch {
+                        Write-Log "Could not terminate $($proc.ProcessName) - trying taskkill..." "WARNING"
+                        Start-Process "taskkill" -ArgumentList "/F", "/PID", $proc.Id -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+        } catch {
+            # Ignore errors for non-existent processes
+        }
+    }
+    
+    if ($killedProcesses -gt 0) {
+        Write-Log "✅ Terminated $killedProcesses conflicting processes" "SUCCESS"
+        Write-Log "⏳ Waiting 5 seconds for process cleanup..." "INFO"
+        Start-Sleep -Seconds 5
+    } else {
+        Write-Log "✅ No conflicting processes found" "SUCCESS"
+    }
+    
+    # Also check for running installer files directly
+    try {
+        $runningInstallers = Get-Process | Where-Object { 
+            $_.Path -and (
+                $_.Path -like "*Windows11InstallationAssistant*" -or
+                $_.Path -like "*Windows11*" -or
+                $_.ProcessName -like "*setup*" -or
+                $_.ProcessName -like "*upgrade*"
+            )
+        }
+        
+        foreach ($installer in $runningInstallers) {
+            Write-Log "🛑 Terminating installer process: $($installer.ProcessName) at $($installer.Path)" "INFO"
+            try {
+                $installer | Stop-Process -Force
+                Start-Sleep -Seconds 2
+            } catch {
+                Write-Log "Could not terminate installer process" "WARNING"
+            }
+        }
+    } catch {
+        # Ignore errors
+    }
+    
+    # Automatic restart arguments for enterprise deployment
+    $arguments = if ($AutomaticMode -or $ForceRestart) {
+        @("/quietinstall", "/skipeula", "/auto upgrade", "/CopyLogs `"$LogFile`"")  # Allow automatic restart
+    } else {
+        @("/quietinstall", "/skipeula", "/auto upgrade", "/CopyLogs `"$LogFile`"", "/noreboot")  # No auto restart
+    }
+    
+    $argumentString = $arguments -join " "
+    
+    Write-Log "🚀 Running installer with arguments: $argumentString" "INFO"
+    Write-Log "🤖 Automatic mode: System will restart automatically when upgrade completes" "INFO"
+    
+
+    
+    # Clean up scheduled task if it exists (in case this is the post-restart run)
+    try {
+        Unregister-ScheduledTask -TaskName "ContinueWindows11Upgrade" -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Log "✅ Cleaned up restart continuation task" "SUCCESS"
+    } catch { }
+    
+    # Add retry logic for the installer with different approaches
+    $maxRetries = 3
+    $retryCount = 0
+    $installerSuccess = $false
+    
+    while ($retryCount -lt $maxRetries -and -not $installerSuccess) {
+        $retryCount++
+        
+        if ($retryCount -gt 1) {
+            Write-Log "🔄 Installer attempt $retryCount of $maxRetries..." "INFO"
+            
+            # More aggressive cleanup between retries
+            Write-Log "🧹 Performing aggressive cleanup before retry..." "INFO"
+            
+            # Kill any remaining processes
+            Get-Process | Where-Object { 
+                $_.ProcessName -like "*Windows11*" -or 
+                $_.ProcessName -like "*setup*" -or 
+                $_.ProcessName -like "*upgrade*" 
+            } | ForEach-Object {
+                try { $_ | Stop-Process -Force -ErrorAction SilentlyContinue } catch { }
+            }
+            
+            # Remove temp files
+            if (Test-Path $Installer) {
+                Remove-Item $Installer -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 2
+                
+                # Re-download if needed
+                try {
+                    Invoke-WebRequest -Uri $DownloadUrl -OutFile $Installer -UseBasicParsing -TimeoutSec 60
+                    Write-Log "✅ Re-downloaded installer for retry" "SUCCESS"
+                } catch {
+                    Write-Log "❌ Failed to re-download installer" "ERROR"
+                    continue
+                }
+            }
+            
+            Start-Sleep -Seconds 5
+        }
+        
+        try {
+            Write-Log "▶️  Starting installer process (attempt $retryCount)..." "INFO"
+            
+            # Try with different startup methods and escalated privileges
+            if ($retryCount -eq 1) {
+                # Standard method with real-time progress monitoring
+                Write-Log "Method 1: Standard execution with real-time progress tracking" "INFO"
+                
+                # Start installer without -Wait so we can monitor progress
+                $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -WindowStyle Hidden
+                
+                # Start progress monitoring
+                if ($process -and !$process.HasExited) {
+                    Show-InstallationProgress -Process $process -LogFile $LogFile -EstimatedDurationMinutes 45
+                    
+                    # Wait for completion
+                    $process.WaitForExit()
+                } else {
+                    Write-Log "⚠️  Installer process failed to start or exited immediately" "WARNING"
+                }
+            } elseif ($retryCount -eq 2) {
+                # Alternative method - run as SYSTEM using PsExec-like approach
+                Write-Log "Method 2: Attempting to run as SYSTEM using scheduled task" "INFO"
+                try {
+                    # Create a temporary scheduled task to run as SYSTEM
+                    $taskName = "Windows11UpgradeTemp"
+                    $taskAction = New-ScheduledTaskAction -Execute $Installer -Argument $argumentString
+                    $taskPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+                    $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+                    
+                    Register-ScheduledTask -TaskName $taskName -Action $taskAction -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
+                    Start-ScheduledTask -TaskName $taskName
+                    
+                    # Wait for completion
+                    $timeout = 0
+                    do {
+                        Start-Sleep -Seconds 10
+                        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+                        $timeout += 10
+                    } while ($task.State -eq "Running" -and $timeout -lt 300)
+                    
+                    # Get exit code from task history
+                    $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+                    $process = [PSCustomObject]@{ ExitCode = $taskInfo.LastTaskResult }
+                    
+                    # Clean up task
+                    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+                    
+                    Write-Log "✅ SYSTEM execution completed with code: $($process.ExitCode)" "SUCCESS"
+                } catch {
+                    Write-Log "❌ SYSTEM execution failed: $($_.Exception.Message)" "ERROR"
+                    # Fallback to standard method
+                    $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -Wait
+                }
+            } else {
+                # Last resort - minimal arguments with visible window and progress monitoring
+                Write-Log "Method 3: Minimal arguments with progress tracking" "INFO"
+                $simpleArgs = @("/quietinstall", "/auto upgrade")
+                
+                # Start installer without -Wait for progress monitoring
+                $process = Start-Process -FilePath $Installer -ArgumentList ($simpleArgs -join " ") -PassThru
+                
+                # Monitor progress if process started successfully
+                if ($process -and !$process.HasExited) {
+                    Show-InstallationProgress -Process $process -LogFile $LogFile -EstimatedDurationMinutes 60
+                    $process.WaitForExit()
+                } else {
+                    Write-Log "⚠️  Fallback installer process failed to start" "WARNING"
+                }
+            }
+            
+            $installerSuccess = $true
+            Write-Log "✅ Installer process completed with exit code: $($process.ExitCode)" "SUCCESS"
+            
+        } catch {
+            Write-Log "❌ Installer attempt $retryCount failed: $($_.Exception.Message)" "ERROR"
+            if ($retryCount -lt $maxRetries) {
+                Write-Log "🔄 Will retry in 10 seconds..." "INFO"
+                Start-Sleep -Seconds 10
+            }
+        }
+    }
+    
+    if (-not $installerSuccess) {
+        Write-Log "❌ Installer failed after $maxRetries attempts" "ERROR"
+        Write-Log "💡 Try running manually: $Installer /quietinstall /auto upgrade" "INFO"
+        exit 6
+    }
+    
+    # Step 9: Check results
+    $CurrentStep++
+    Update-Progress "Windows 11 Upgrade" "Checking upgrade results..." $CurrentStep
+    
+    $exitCode = $process.ExitCode
+    Write-Log "Installer exit code: $exitCode" "INFO"
+    
+    # Interpret exit codes for Windows 11 Installation Assistant
+    $exitCodeMeaning = switch ($exitCode) {
+        0 { "Success - Upgrade completed successfully" }
+        1 { "General error or user cancellation" }
+        2 { "Invalid command line arguments" }
+        3 { "System restart required to continue upgrade" }
+        4 { "Insufficient disk space" }
+        5 { "Another instance is running or access denied" }
+        6 { "Unsupported operating system" }
+        7 { "Network connection error" }
+        8 { "Windows Update service unavailable" }
+        9 { "Hardware compatibility check failed" }
+        10 { "User account control (UAC) restriction" }
+        -1 { "Unexpected error occurred" }
+        default { "Unknown exit code - check Windows 11 compatibility" }
+    }
+    
+    Write-Log "Exit code meaning: $exitCodeMeaning" "INFO"
+    
+    if ($exitCode -eq 0) {
+        Write-Log "🎉 Windows 11 upgrade completed successfully!" "SUCCESS"
+        
+        # Check if system actually upgraded to Windows 11
+        Start-Sleep -Seconds 3  # Brief pause to let system settle
+        $postUpgradeOS = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -ErrorAction SilentlyContinue
+        $postUpgradeBuild = if ($postUpgradeOS) { [int]$postUpgradeOS.CurrentBuild } else { 0 }
+        
+        Write-Log "📋 Pre-upgrade build: $currentBuild | Post-upgrade build: $postUpgradeBuild" "INFO"
+        
+        if ($postUpgradeBuild -ge 22000) {
+            Write-Log "✅ Confirmed: System upgraded to Windows 11 (Build $postUpgradeBuild)" "SUCCESS"
+            Write-Log "🚀 Restart not required - upgrade completed in-place" "SUCCESS"
+            
+            if (-not $AutomaticMode) {
+                Write-Host "🎉 Windows 11 upgrade completed successfully!" -ForegroundColor Green
+                Write-Host "✅ You are now running Windows 11 Build $postUpgradeBuild!" -ForegroundColor Green
+            }
+        } elseif ($postUpgradeBuild -eq $currentBuild) {
+            # Build number didn't change - Installation Assistant didn't actually upgrade
+            Write-Log "❌ FALSE POSITIVE: Installation Assistant reported success but no upgrade occurred" "ERROR"
+            Write-Log "📋 System is still on Windows 10 Build $postUpgradeBuild" "WARNING"
+            
+            # Check for common reasons why upgrade didn't happen
+            $upgradeIssues = @()
+            
+            if ($postUpgradeBuild -ge 22000) {
+                $upgradeIssues += "System is already Windows 11"
+            } elseif ($postUpgradeBuild -lt 19041) {
+                $upgradeIssues += "Windows 10 version too old (need 19041+ for Windows 11)"
+            } else {
+                $upgradeIssues += "Hardware may not meet Windows 11 requirements despite bypasses"
+            }
+            
+            # Check if upgrade files were downloaded but installation failed
+            if (Test-Path "C:\`$Windows.~BT" -ErrorAction SilentlyContinue) {
+                $upgradeIssues += "Upgrade files downloaded but installation failed"
+                Write-Log "� Found Windows upgrade files in C:\`$Windows.~BT" "INFO"
+                
+                # Try manual restart to complete installation
+                if ($AutomaticMode -or $ForceRestart) {
+                    Write-Log "�🔄 Attempting restart to complete pending installation..." "INFO"
+                    Start-Process "shutdown.exe" -ArgumentList "/r", "/t", "120", "/c", "Restarting to complete Windows 11 installation - 2 minutes" -WindowStyle Hidden
+                    
+                    if (-not $AutomaticMode) {
+                        Write-Host "🔄 Installation files found - restarting in 2 minutes to complete upgrade" -ForegroundColor Yellow
+                    }
+                } else {
+                    Write-Log "⚠️  Manual restart required to complete pending installation" "WARNING"
+                    if (-not $AutomaticMode) {
+                        Write-Host "🔄 Installation files found - please restart to complete upgrade" -ForegroundColor Yellow
+                    }
+                }
+            } else {
+                # No upgrade files found - Installation Assistant didn't actually do anything
+                Write-Log "❌ No Windows upgrade files found - Installation Assistant exited without upgrading" "ERROR"
+                
+                if (-not $AutomaticMode) {
+                    Write-Host "❌ Installation Assistant completed but no upgrade occurred" -ForegroundColor Red
+                    Write-Host "📋 Possible reasons:" -ForegroundColor Yellow
+                    foreach ($issue in $upgradeIssues) {
+                        Write-Host "   • $issue" -ForegroundColor Gray
+                    }
+                    Write-Host "💡 Try running the script with different parameters or check Windows Update" -ForegroundColor Cyan
+                }
+            }
+            
+        } else {
+            Write-Log "🔄 System shows successful upgrade but restart needed to complete" "INFO"
+            Write-Log "📋 Current build: $postUpgradeBuild, Windows 11 requires build 22000+" "INFO"
+            
+            if ($AutomaticMode -or $ForceRestart) {
+                Write-Log "🤖 Scheduling automatic restart to complete Windows 11 upgrade..." "INFO"
+                
+                # Clean up any existing scheduled tasks
+                try {
+                    Unregister-ScheduledTask -TaskName "ContinueWindows11Upgrade" -Confirm:$false -ErrorAction SilentlyContinue
+                } catch { }
+                
+                # Schedule restart in 60 seconds
+                Write-Log "⏰ System will restart in 60 seconds to complete Windows 11 upgrade" "INFO"
+                Start-Process "shutdown.exe" -ArgumentList "/r", "/t", "60", "/c", "Windows 11 upgrade completed - restarting in 60 seconds to finalize" -WindowStyle Hidden
+                
+                if (-not $AutomaticMode) {
+                    Write-Host "🎉 Windows 11 upgrade completed successfully!" -ForegroundColor Green
+                    Write-Host "🔄 System will restart in 60 seconds to finalize the upgrade" -ForegroundColor Yellow
+                    Write-Host "🚀 After restart, you'll be running Windows 11!" -ForegroundColor Green
+                }
+            } else {
+                Write-Log "⚠️  Manual restart recommended to complete Windows 11 upgrade" "WARNING"
+                if (-not $AutomaticMode) {
+                    Write-Host "🎉 Windows 11 upgrade completed successfully!" -ForegroundColor Green
+                    Write-Host "🔄 Please restart your computer to finalize the upgrade" -ForegroundColor Yellow
+                }
+            }
+        }
+    } elseif ($exitCode -eq 3) {
+        Write-Log "🔄 System restart required - upgrade will continue after reboot" "INFO"
+        if ($AutomaticMode -or $ForceRestart) {
+            Write-Log "🤖 Scheduling automatic restart..." "INFO"
+            
+            # Create scheduled task to continue after restart
+            $taskAction = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"iex (iwr -Uri 'https://raw.githubusercontent.com/meltonjoshua/simple-windows-upgrade/main/Upgrade-Windows11-Fixed.ps1' -UseBasicParsing).Content`""
+            $taskTrigger = New-ScheduledTaskTrigger -AtStartup
+            $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+            $taskPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+            
+            try {
+                Register-ScheduledTask -TaskName "ContinueWindows11Upgrade" -Action $taskAction -Trigger $taskTrigger -Settings $taskSettings -Principal $taskPrincipal -Force
+                Write-Log "✅ Scheduled task created for post-restart continuation" "SUCCESS"
+            } catch {
+                Write-Log "⚠️  Could not create scheduled task: $($_.Exception.Message)" "WARNING"
+            }
+            
+            Start-Process "shutdown.exe" -ArgumentList "/r", "/t", "60", "/c", "Windows 11 upgrade requires restart - continuing in 60 seconds" -WindowStyle Hidden
+        } else {
+            Write-Log "⚠️  Manual restart required to complete upgrade" "WARNING"
+        }
+    } elseif ($exitCode -eq 5) {
+        Write-Log "⚠️  Exit code 5: Another instance may be running or access denied" "WARNING"
+        Write-Log "🔄 This often indicates the upgrade is already in progress in background" "INFO"
+        Write-Log "💡 Check Task Manager for Windows11InstallationAssistant or wait a few minutes" "INFO"
+        
+        # Check if upgrade is actually in progress
+        $upgradeProcesses = Get-Process | Where-Object { 
+            $_.ProcessName -like "*Windows11*" -or 
+            $_.ProcessName -like "*setup*" -or 
+            $_.MainWindowTitle -like "*Windows 11*"
+        }
+        
+        if ($upgradeProcesses) {
+            Write-Log "✅ Found active upgrade processes - upgrade likely in progress" "SUCCESS"
+            foreach ($proc in $upgradeProcesses) {
+                Write-Log "Active: $($proc.ProcessName) (PID: $($proc.Id))" "INFO"
+            }
+        } else {
+            Write-Log "❌ No active upgrade processes found - may need manual intervention" "WARNING"
+            
+            # Try alternative Windows Update method
+            Write-Log "🔄 Attempting Windows Update method as fallback..." "INFO"
+            try {
+                # Check if Windows 11 is available via Windows Update
+                $updateSession = New-Object -ComObject Microsoft.Update.Session
+                $updateSearcher = $updateSession.CreateUpdateSearcher()
+                $updateSearcher.Online = $true
+                
+                Write-Log "🔍 Searching for Windows 11 feature update via Windows Update..." "INFO"
+                $searchResult = $updateSearcher.Search("IsInstalled=0 and Type='Software' and CategoryIDs contains '5312e4f1-6372-442d-aeb2-15f2132c9bd7'")
+                
+                if ($searchResult.Updates.Count -gt 0) {
+                    Write-Log "✅ Found Windows 11 feature update via Windows Update!" "SUCCESS"
+                    
+                    $windows11Update = $searchResult.Updates | Where-Object { $_.Title -like "*Windows 11*" -or $_.Title -like "*feature update*" } | Select-Object -First 1
+                    
+                    if ($windows11Update) {
+                        Write-Log "📦 Available update: $($windows11Update.Title)" "INFO"
+                        Write-Log "🚀 Initiating Windows 11 upgrade via Windows Update..." "INFO"
+                        
+                        # Create update collection and download
+                        $updateCollection = New-Object -ComObject Microsoft.Update.UpdateColl
+                        $updateCollection.Add($windows11Update) | Out-Null
+                        
+                        $downloader = $updateSession.CreateUpdateDownloader()
+                        $downloader.Updates = $updateCollection
+                        Write-Log "⬇️  Downloading Windows 11 update..." "INFO"
+                        $downloadResult = $downloader.Download()
+                        
+                        if ($downloadResult.ResultCode -eq 2) {
+                            Write-Log "✅ Download completed successfully" "SUCCESS"
+                            
+                            # Install the update
+                            $installer = $updateSession.CreateUpdateInstaller()
+                            $installer.Updates = $updateCollection
+                            Write-Log "🔧 Installing Windows 11 update..." "INFO"
+                            $installResult = $installer.Install()
+                            
+                            if ($installResult.ResultCode -eq 2) {
+                                Write-Log "🎉 Windows 11 update installed successfully via Windows Update!" "SUCCESS"
+                                if ($installResult.RebootRequired) {
+                                    Write-Log "🔄 System restart required to complete upgrade" "INFO"
+                                    if ($AutomaticMode -or $ForceRestart) {
+                                        Write-Log "🤖 Scheduling automatic restart..." "INFO"
+                                        Start-Process "shutdown.exe" -ArgumentList "/r", "/t", "120", "/c", "Windows 11 upgrade requires restart" -WindowStyle Hidden
+                                    }
+                                }
+                            } else {
+                                Write-Log "⚠️  Windows Update installation completed with code: $($installResult.ResultCode)" "WARNING"
+                            }
+                        } else {
+                            Write-Log "❌ Windows Update download failed with code: $($downloadResult.ResultCode)" "ERROR"
+                        }
+                    }
+                } else {
+                    Write-Log "❌ Windows 11 not available via Windows Update for this system" "WARNING"
+                    Write-Log "💡 This system may not be eligible for Windows 11 upgrade" "INFO"
+                    Write-Log "🔍 Check Windows 11 compatibility at: https://aka.ms/GetWindows11" "INFO"
+                }
+            } catch {
+                Write-Log "❌ Windows Update method failed: $($_.Exception.Message)" "ERROR"
+                Write-Log "💡 System may not be compatible with Windows 11" "WARNING"
+            }
+        }
+        
+        if (-not $AutomaticMode) {
+            Write-Host "⚠️  Upgrade initiated but needs verification. Check if Windows 11 upgrade is running in background." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Log "❌ Upgrade completed with exit code: $exitCode ($exitCodeMeaning)" "WARNING"
+        if (-not $AutomaticMode) {
+            Write-Host "⚠️  Upgrade completed with warnings. Exit code: $exitCode - $exitCodeMeaning" -ForegroundColor Yellow
+        }
+    }
+    
+    Write-Progress -Activity "Windows 11 Upgrade" -Completed
+    
+} catch {
+    Write-Log "❌ Critical error: $($_.Exception.Message)" "ERROR"
+    if (-not $AutomaticMode) {
+        Write-Host "❌ Script execution failed: $($_.Exception.Message)" -ForegroundColor Red
+    }
+    exit 99
+} finally {
+    # Cleanup
+    Write-Log "=== UPGRADE SUMMARY ===" "INFO"
+    
+    # Safe duration calculation
+    try {
+        $duration = (Get-Date) - $script:StartTime
+        $durationMinutes = [math]::Round($duration.TotalMinutes, 1)
+        Write-Log "Total duration: $durationMinutes minutes" "INFO"
+    } catch {
+        Write-Log "Total duration: Calculation error" "INFO"
+    }
+    
+    Write-Log "Windows 11 Upgrade script completed at $(Get-Date -Format 'MM/dd/yyyy HH:mm:ss')" "INFO"
+    
+    # No user interaction prompts in automatic mode
+    if (-not $AutomaticMode) {
+        Write-Host ""
+        Write-Host "Press any key to close this window..." -ForegroundColor Yellow
+        try {
+            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        } catch {
+            Start-Sleep 2
+        }
+    } else {
+        Write-Log "🤖 Automatic mode: Script completed without user interaction" "INFO"
+    }
+}
