@@ -380,16 +380,16 @@ try {
         @{ Path = "HKLM:\SYSTEM\CurrentControlSet\Services\PCHealthCheck"; Name = "Start"; Value = 4; Description = "Disable PC Health Check service (disabled)" },
         @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; Name = "PCHealthCheck"; Value = ""; Description = "Remove PC Health Check from startup" },
         @{ Path = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"; Name = "PCHealthCheck"; Value = ""; Description = "Remove PC Health Check from startup (32-bit)" },
-        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows Health"; Name = "DisableHealthCheck"; Description = "Disable Windows Health checking" },
-        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows Health"; Name = "BypassCompatibilityCheck"; Description = "Bypass compatibility checking via Windows Health" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows Health"; Name = "DisableHealthCheck"; Value = 1; Description = "Disable Windows Health checking" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows Health"; Name = "BypassCompatibilityCheck"; Value = 1; Description = "Bypass compatibility checking via Windows Health" },
         
         # Windows 11 readiness and health check bypasses
         @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"; Name = "PCHealthCheck.exe"; Value = "RUNASADMIN DISABLETHEMES"; Description = "Force PC Health Check compatibility mode" },
         @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppCompatFlags\Layers"; Name = "Windows11InstallationAssistant.exe"; Value = "RUNASADMIN DISABLETHEMES WIN8RTM"; Description = "Force Installation Assistant compatibility" },
-        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\HealthCheck"; Name = "DisableHealthCheck"; Description = "Group policy disable health check" },
-        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\HealthCheck"; Name = "BypassHealthCheck"; Description = "Group policy bypass health check" },
-        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\PCHealthCheck"; Name = "DisableApplication"; Description = "Group policy disable PC Health Check app" },
-        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\PCHealthCheck"; Name = "PreventExecution"; Description = "Group policy prevent PC Health Check execution" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\HealthCheck"; Name = "DisableHealthCheck"; Value = 1; Description = "Group policy disable health check" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\HealthCheck"; Name = "BypassHealthCheck"; Value = 1; Description = "Group policy bypass health check" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\PCHealthCheck"; Name = "DisableApplication"; Value = 1; Description = "Group policy disable PC Health Check app" },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\PCHealthCheck"; Name = "PreventExecution"; Value = 1; Description = "Group policy prevent PC Health Check execution" },
         
         # Microsoft Store and app deployment health check bypasses
         @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications"; Name = "Microsoft.PCHealthCheck_8wekyb3d8bbwe"; Value = ""; Description = "Remove PC Health Check from app store registry" },
@@ -400,33 +400,33 @@ try {
         @{ Path = "HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0"; Name = "ProcessorNameString"; Value = "Intel(R) Core(TM) i7-8700K CPU @ 3.70GHz"; Description = "Spoof supported CPU" },
         
         # Setup and upgrade service bypasses  
-        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup"; Name = "AllowUpgrade"; Description = "Allow upgrade on incompatible hardware" },
-        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\OOBE"; Name = "BypassNRO"; Description = "Bypass network requirement for OOBE" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup"; Name = "AllowUpgrade"; Value = 1; Description = "Allow upgrade on incompatible hardware" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\OOBE"; Name = "BypassNRO"; Value = 1; Description = "Bypass network requirement for OOBE" },
         @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State"; Name = "ImageState"; Value = "IMAGE_STATE_COMPLETE"; Description = "Force complete image state" },
         
         # Windows Update and feature update bypasses
         @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"; Name = "DisableWindowsUpdateAccess"; Value = 0; Description = "Enable Windows Update access" },
-        @{ Path = "HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings"; Name = "AllowMUUpdateService"; Description = "Allow Microsoft Update service" },
-        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection"; Name = "AllowTelemetry"; Description = "Allow telemetry for upgrade compatibility" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings"; Name = "AllowMUUpdateService"; Value = 1; Description = "Allow Microsoft Update service" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection"; Name = "AllowTelemetry"; Value = 1; Description = "Allow telemetry for upgrade compatibility" },
         
         # Hardware compatibility bypasses
-        @{ Path = "HKLM:\SYSTEM\Setup\LabConfig"; Name = "BypassCPUCheck"; Description = "Bypass CPU family check" },
-        @{ Path = "HKLM:\SYSTEM\Setup\LabConfig"; Name = "BypassTPMCheck"; Description = "Bypass TPM 2.0 requirement" },
-        @{ Path = "HKLM:\SYSTEM\Setup\LabConfig"; Name = "BypassSecureBootCheck"; Description = "Bypass Secure Boot requirement" },
-        @{ Path = "HKLM:\SYSTEM\Setup\LabConfig"; Name = "BypassRAMCheck"; Description = "Bypass 4GB+ RAM requirement" },
+        @{ Path = "HKLM:\SYSTEM\Setup\LabConfig"; Name = "BypassCPUCheck"; Value = 1; Description = "Bypass CPU family check" },
+        @{ Path = "HKLM:\SYSTEM\Setup\LabConfig"; Name = "BypassTPMCheck"; Value = 1; Description = "Bypass TPM 2.0 requirement" },
+        @{ Path = "HKLM:\SYSTEM\Setup\LabConfig"; Name = "BypassSecureBootCheck"; Value = 1; Description = "Bypass Secure Boot requirement" },
+        @{ Path = "HKLM:\SYSTEM\Setup\LabConfig"; Name = "BypassRAMCheck"; Value = 1; Description = "Bypass 4GB+ RAM requirement" },
         
         # Additional setup bypasses for stubborn systems
-        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\OOBE"; Name = "SetupDisplayedEula"; Description = "Skip EULA display" },
-        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\OOBE"; Name = "PrivacyConsentStatus"; Description = "Auto-accept privacy consent" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\OOBE"; Name = "SetupDisplayedEula"; Value = 1; Description = "Skip EULA display" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\OOBE"; Name = "PrivacyConsentStatus"; Value = 3; Description = "Auto-accept privacy consent" },
         @{ Path = "HKLM:\SYSTEM\Setup"; Name = "CmdLine"; Value = ""; Description = "Clear setup command line restrictions" },
         
         # Windows 11 readiness and compatibility
-        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\TargetVersionUpgradeExperienceIndicators"; Name = "NorthStar.Win11"; Description = "Enable Windows 11 upgrade experience" },
-        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\TargetVersionUpgradeExperienceIndicators"; Name = "Redstone4.Win11"; Description = "Enable Windows 11 compatibility flags" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\TargetVersionUpgradeExperienceIndicators"; Name = "NorthStar.Win11"; Value = 1; Description = "Enable Windows 11 upgrade experience" },
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\TargetVersionUpgradeExperienceIndicators"; Name = "Redstone4.Win11"; Value = 1; Description = "Enable Windows 11 compatibility flags" },
         
         # Force compatibility overrides
         @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\CompatData"; Name = "CompatibilityMode"; Value = "Enabled"; Description = "Force compatibility mode" },
-        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\CompatData"; Name = "AllowIncompatibleHardware"; Description = "Allow incompatible hardware upgrade" }
+        @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\CompatData"; Name = "AllowIncompatibleHardware"; Value = 1; Description = "Allow incompatible hardware upgrade" }
     )
     
     $bypassCount = 0
@@ -443,8 +443,8 @@ try {
             }
             
             # Determine the value to set (default to 1 if not specified)
-            $value = if ($item.ContainsKey('Value')) { $item.Value } else { 1 }
-            $valueType = if ($item.Value -is [string]) { "String" } else { "DWord" }
+            $value = if ($item.ContainsKey('Value') -and $null -ne $item.Value) { $item.Value } else { 1 }
+            $valueType = if ($value -is [string]) { "String" } else { "DWord" }
             
             # Set the registry value
             if ($valueType -eq "String") {
