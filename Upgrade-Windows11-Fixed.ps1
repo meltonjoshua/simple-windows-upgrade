@@ -12,7 +12,10 @@
 
 param(
     [switch]$NoProgress,
-    [switch]$ForceRestart
+    [switch]$ForceRestart,
+    [switch]$AutomaticMode,
+    [switch]$KeepOpen,
+    [switch]$ShowProgress = $true
 )
 
 # FORCE BYPASS ALL HEALTH CHECKS - Always skip for maximum speed
