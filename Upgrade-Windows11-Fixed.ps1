@@ -1067,9 +1067,65 @@ try {
         $postUpgradeOS = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -ErrorAction SilentlyContinue
         $postUpgradeBuild = if ($postUpgradeOS) { [int]$postUpgradeOS.CurrentBuild } else { 0 }
         
+        Write-Log "📋 Pre-upgrade build: $currentBuild | Post-upgrade build: $postUpgradeBuild" "INFO"
+        
         if ($postUpgradeBuild -ge 22000) {
             Write-Log "✅ Confirmed: System upgraded to Windows 11 (Build $postUpgradeBuild)" "SUCCESS"
             Write-Log "🚀 Restart not required - upgrade completed in-place" "SUCCESS"
+            
+            if (-not $AutomaticMode) {
+                Write-Host "🎉 Windows 11 upgrade completed successfully!" -ForegroundColor Green
+                Write-Host "✅ You are now running Windows 11 Build $postUpgradeBuild!" -ForegroundColor Green
+            }
+        } elseif ($postUpgradeBuild -eq $currentBuild) {
+            # Build number didn't change - Installation Assistant didn't actually upgrade
+            Write-Log "❌ FALSE POSITIVE: Installation Assistant reported success but no upgrade occurred" "ERROR"
+            Write-Log "📋 System is still on Windows 10 Build $postUpgradeBuild" "WARNING"
+            
+            # Check for common reasons why upgrade didn't happen
+            $upgradeIssues = @()
+            
+            if ($postUpgradeBuild -ge 22000) {
+                $upgradeIssues += "System is already Windows 11"
+            } elseif ($postUpgradeBuild -lt 19041) {
+                $upgradeIssues += "Windows 10 version too old (need 19041+ for Windows 11)"
+            } else {
+                $upgradeIssues += "Hardware may not meet Windows 11 requirements despite bypasses"
+            }
+            
+            # Check if upgrade files were downloaded but installation failed
+            if (Test-Path "C:\`$Windows.~BT" -ErrorAction SilentlyContinue) {
+                $upgradeIssues += "Upgrade files downloaded but installation failed"
+                Write-Log "� Found Windows upgrade files in C:\`$Windows.~BT" "INFO"
+                
+                # Try manual restart to complete installation
+                if ($AutomaticMode -or $ForceRestart) {
+                    Write-Log "�🔄 Attempting restart to complete pending installation..." "INFO"
+                    Start-Process "shutdown.exe" -ArgumentList "/r", "/t", "120", "/c", "Restarting to complete Windows 11 installation - 2 minutes" -WindowStyle Hidden
+                    
+                    if (-not $AutomaticMode) {
+                        Write-Host "🔄 Installation files found - restarting in 2 minutes to complete upgrade" -ForegroundColor Yellow
+                    }
+                } else {
+                    Write-Log "⚠️  Manual restart required to complete pending installation" "WARNING"
+                    if (-not $AutomaticMode) {
+                        Write-Host "🔄 Installation files found - please restart to complete upgrade" -ForegroundColor Yellow
+                    }
+                }
+            } else {
+                # No upgrade files found - Installation Assistant didn't actually do anything
+                Write-Log "❌ No Windows upgrade files found - Installation Assistant exited without upgrading" "ERROR"
+                
+                if (-not $AutomaticMode) {
+                    Write-Host "❌ Installation Assistant completed but no upgrade occurred" -ForegroundColor Red
+                    Write-Host "📋 Possible reasons:" -ForegroundColor Yellow
+                    foreach ($issue in $upgradeIssues) {
+                        Write-Host "   • $issue" -ForegroundColor Gray
+                    }
+                    Write-Host "💡 Try running the script with different parameters or check Windows Update" -ForegroundColor Cyan
+                }
+            }
+            
         } else {
             Write-Log "🔄 System shows successful upgrade but restart needed to complete" "INFO"
             Write-Log "📋 Current build: $postUpgradeBuild, Windows 11 requires build 22000+" "INFO"
@@ -1098,10 +1154,6 @@ try {
                     Write-Host "🔄 Please restart your computer to finalize the upgrade" -ForegroundColor Yellow
                 }
             }
-        }
-        
-        if (-not $AutomaticMode -and $postUpgradeBuild -ge 22000) {
-            Write-Host "🎉 Windows 11 upgrade completed successfully!" -ForegroundColor Green
         }
     } elseif ($exitCode -eq 3) {
         Write-Log "🔄 System restart required - upgrade will continue after reboot" "INFO"
