@@ -437,42 +437,143 @@ try {
     $CurrentStep++
     Update-Progress "Windows 11 Upgrade" "Starting Windows 11 upgrade..." $CurrentStep
     
-    # Kill any existing installer processes
-    $processesToKill = @("Windows11InstallationAssistant", "Windows11Upgrade", "SetupHost")
-    foreach ($processName in $processesToKill) {
-        try {
-            $processes = Get-Process -Name $processName -ErrorAction SilentlyContinue
-            if ($processes) {
-                foreach ($proc in $processes) {
-                    Write-Log "🛑 Terminating existing process: $($proc.ProcessName)" "INFO"
-                    $proc | Stop-Process -Force
+    # Check if this is a post-restart continuation (upgrade files already exist)
+    $isPostRestart = Test-Path "C:\`$Windows.~BT" -ErrorAction SilentlyContinue
+    
+    if ($isPostRestart) {
+        Write-Log "🔄 POST-RESTART DETECTED: Upgrade files already exist, using continuation mode" "INFO"
+        
+        # Try to complete the existing upgrade first
+        Write-Log "🚀 Attempting to complete existing upgrade installation..." "INFO"
+        
+        # Use different arguments for post-restart continuation
+        $arguments = @("/quietinstall", "/skipeula", "/auto upgrade", "/CopyLogs `"$LogFile`"", "/InstallFrom `"C:\`$Windows.~BT`"")
+        
+        # Also try manual completion via setup.exe if it exists
+        $setupPath = "C:\`$Windows.~BT\Setup.exe"
+        if (Test-Path $setupPath) {
+            Write-Log "📦 Found setup.exe in upgrade files, attempting direct execution..." "INFO"
+            try {
+                $setupArgs = @("/Auto", "upgrade", "/quiet", "/ShowOOBE", "none", "/Telemetry", "disable")
+                $setupProcess = Start-Process -FilePath $setupPath -ArgumentList ($setupArgs -join " ") -PassThru -WindowStyle Hidden
+                
+                if ($setupProcess -and !$setupProcess.HasExited) {
+                    Write-Log "✅ Started setup.exe from upgrade files" "SUCCESS"
+                    Show-InstallationProgress -Process $setupProcess -LogFile $LogFile -EstimatedDurationMinutes 30
+                    $setupProcess.WaitForExit()
+                    $exitCode = $setupProcess.ExitCode
+                    
+                    if ($exitCode -eq 0) {
+                        Write-Log "🎉 Setup.exe completed successfully!" "SUCCESS"
+                        # Skip downloading new installer since upgrade completed
+                        $CurrentStep = 7  # Skip to result checking
+                        $process = $setupProcess  # Use setup process for result checking
+                    } else {
+                        Write-Log "⚠️  Setup.exe failed with code $exitCode, falling back to Installation Assistant" "WARNING"
+                    }
+                } else {
+                    Write-Log "❌ Setup.exe failed to start, falling back to Installation Assistant" "WARNING"
                 }
+            } catch {
+                Write-Log "❌ Setup.exe execution failed: $($_.Exception.Message)" "ERROR"
+                Write-Log "🔄 Falling back to Installation Assistant method..." "INFO"
             }
-        } catch { }
+        }
+    } else {
+        Write-Log "🆕 FRESH INSTALL: No existing upgrade files detected" "INFO"
+        $arguments = @("/quietinstall", "/skipeula", "/auto upgrade", "/CopyLogs `"$LogFile`"")
     }
     
-    # Installer arguments for automatic mode
-    $arguments = @("/quietinstall", "/skipeula", "/auto upgrade", "/CopyLogs `"$LogFile`"")
-    $argumentString = $arguments -join " "
-    
-    Write-Log "🚀 Running installer with arguments: $argumentString" "INFO"
-    Write-Log "🤖 Auto-restart mode: System will restart automatically when needed" "INFO"
-    
-    # Start installer with progress monitoring
-    try {
-        $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -WindowStyle Hidden
+    # Only proceed with Installation Assistant if setup.exe didn't work
+    if ($CurrentStep -ne 7) {
         
-        if ($process -and !$process.HasExited) {
-            Show-InstallationProgress -Process $process -LogFile $LogFile -EstimatedDurationMinutes 45
-            $process.WaitForExit()
-        } else {
-            Write-Log "⚠️  Installer process failed to start or exited immediately" "WARNING"
+        # Kill any existing installer processes
+        $processesToKill = @("Windows11InstallationAssistant", "Windows11Upgrade", "SetupHost", "setup")
+        foreach ($processName in $processesToKill) {
+            try {
+                $processes = Get-Process -Name $processName -ErrorAction SilentlyContinue
+                if ($processes) {
+                    foreach ($proc in $processes) {
+                        Write-Log "🛑 Terminating existing process: $($proc.ProcessName)" "INFO"
+                        $proc | Stop-Process -Force
+                    }
+                }
+            } catch { }
         }
         
-        $exitCode = $process.ExitCode
-    } catch {
-        Write-Log "❌ Failed to start installer: $($_.Exception.Message)" "ERROR"
-        exit 6
+        $argumentString = $arguments -join " "
+        Write-Log "🚀 Running Installation Assistant with arguments: $argumentString" "INFO"
+        
+        if ($isPostRestart) {
+            Write-Log "🔄 POST-RESTART MODE: Attempting to resume/complete existing upgrade" "INFO"
+        } else {
+            Write-Log "🆕 FRESH MODE: Starting new Windows 11 upgrade" "INFO"
+        }
+        
+        # Start installer with progress monitoring
+        try {
+            $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -WindowStyle Hidden
+            
+            if ($process -and !$process.HasExited) {
+                $estimatedTime = if ($isPostRestart) { 20 } else { 45 }  # Less time needed for post-restart
+                Show-InstallationProgress -Process $process -LogFile $LogFile -EstimatedDurationMinutes $estimatedTime
+                $process.WaitForExit()
+            } else {
+                Write-Log "⚠️  Installer process failed to start or exited immediately" "WARNING"
+            }
+            
+            $exitCode = $process.ExitCode
+        } catch {
+            Write-Log "❌ Failed to start installer: $($_.Exception.Message)" "ERROR"
+            
+            # Try Windows Update API as fallback
+            if ($isPostRestart) {
+                Write-Log "🔄 POST-RESTART FALLBACK: Trying Windows Update API..." "INFO"
+                try {
+                    # Force Windows Update to recognize and install pending feature update
+                    $updateSession = New-Object -ComObject Microsoft.Update.Session
+                    $updateSearcher = $updateSession.CreateUpdateSearcher()
+                    
+                    Write-Log "🔍 Searching for pending Windows 11 feature update..." "INFO"
+                    $searchResult = $updateSearcher.Search("IsInstalled=0 and Type='Software'")
+                    
+                    $featureUpdate = $searchResult.Updates | Where-Object { 
+                        $_.Title -like "*Windows 11*" -or 
+                        $_.Title -like "*feature update*" -or
+                        $_.Categories | Where-Object { $_.Name -like "*Feature*" }
+                    } | Select-Object -First 1
+                    
+                    if ($featureUpdate) {
+                        Write-Log "✅ Found pending feature update: $($featureUpdate.Title)" "SUCCESS"
+                        
+                        $updateCollection = New-Object -ComObject Microsoft.Update.UpdateColl
+                        $updateCollection.Add($featureUpdate) | Out-Null
+                        
+                        $installer = $updateSession.CreateUpdateInstaller()
+                        $installer.Updates = $updateCollection
+                        
+                        Write-Log "🚀 Installing Windows 11 via Windows Update API..." "INFO"
+                        $installResult = $installer.Install()
+                        
+                        if ($installResult.ResultCode -eq 2) {
+                            Write-Log "🎉 Windows 11 installed successfully via Windows Update!" "SUCCESS"
+                            $exitCode = 0
+                        } else {
+                            Write-Log "⚠️  Windows Update installation completed with code: $($installResult.ResultCode)" "WARNING"
+                            $exitCode = $installResult.ResultCode
+                        }
+                    } else {
+                        Write-Log "❌ No pending Windows 11 feature update found in Windows Update" "ERROR"
+                        exit 6
+                    }
+                } catch {
+                    Write-Log "❌ Windows Update API fallback failed: $($_.Exception.Message)" "ERROR"
+                    exit 6
+                }
+            } else {
+                exit 6
+            }
+        }
     }
     
     # Check results
@@ -502,16 +603,75 @@ try {
                 $upgradeIssues += "Upgrade files downloaded but installation failed"
                 Write-Log "💾 Found Windows upgrade files in C:\`$Windows.~BT" "INFO"
                 
-                # AUTOMATIC RESTART - NO CONDITIONAL CHECK NEEDED
-                Write-Log "🔄 Installation files detected - automatically restarting to complete upgrade..." "INFO"
-                Start-Process "shutdown.exe" -ArgumentList "/r", "/t", "120", "/c", "Restarting to complete Windows 11 installation - 2 minutes" -WindowStyle Hidden
-                
-                if (-not $AutomaticMode) {
-                    Write-Host "🔄 Installation files found - automatically restarting in 2 minutes to complete upgrade" -ForegroundColor Yellow
-                    Write-Host "💡 System will restart in 2 minutes to finish the Windows 11 installation" -ForegroundColor Green
+                # Check if upgrade files are complete and ready
+                $upgradeFilesReady = $false
+                try {
+                    # Check for key upgrade files that indicate readiness
+                    $keyFiles = @("Setup.exe", "sources\setup.exe", "sources\install.wim", "sources\boot.wim")
+                    $foundFiles = 0
+                    
+                    foreach ($file in $keyFiles) {
+                        $fullPath = Join-Path "C:\`$Windows.~BT" $file
+                        if (Test-Path $fullPath -ErrorAction SilentlyContinue) {
+                            $foundFiles++
+                            $fileSize = (Get-Item $fullPath -ErrorAction SilentlyContinue).Length
+                            if ($fileSize -gt 100MB) {  # Check for reasonable file size
+                                Write-Log "✅ Found upgrade file: $file ($([math]::Round($fileSize / 1MB, 0)) MB)" "SUCCESS"
+                            }
+                        }
+                    }
+                    
+                    # Consider upgrade files ready if we found most key files
+                    if ($foundFiles -ge 2) {
+                        $upgradeFilesReady = $true
+                        Write-Log "🎯 Upgrade files appear complete ($foundFiles/$($keyFiles.Count) key files found)" "SUCCESS"
+                    } else {
+                        Write-Log "⚠️  Upgrade files appear incomplete ($foundFiles/$($keyFiles.Count) key files found)" "WARNING"
+                        Write-Log "💡 Files may still be downloading or corrupt" "INFO"
+                    }
+                } catch {
+                    Write-Log "⚠️  Could not verify upgrade file completeness: $($_.Exception.Message)" "WARNING"
+                    # Assume ready to attempt restart anyway
+                    $upgradeFilesReady = $true
                 }
                 
-                Write-Log "🚀 AUTO-RESTART: System will automatically restart in 2 minutes" "SUCCESS"
+                if ($upgradeFilesReady) {
+                    # AUTOMATIC RESTART - Files are ready
+                    Write-Log "🔄 Complete upgrade files detected - automatically restarting to finish installation..." "INFO"
+                    Write-Log "⚡ UPGRADE MODE: System will boot into Windows 11 upgrade process" "INFO"
+                    Start-Process "shutdown.exe" -ArgumentList "/r", "/t", "120", "/c", "Restarting to complete Windows 11 installation - 2 minutes" -WindowStyle Hidden
+                    
+                    if (-not $AutomaticMode) {
+                        Write-Host "🔄 Complete upgrade files found - automatically restarting in 2 minutes" -ForegroundColor Yellow
+                        Write-Host "💡 System will restart and boot into Windows 11 upgrade process" -ForegroundColor Green
+                        Write-Host "🚀 After restart, Windows 11 installation will complete automatically" -ForegroundColor Cyan
+                    }
+                    
+                    Write-Log "🚀 AUTO-RESTART: System will automatically restart in 2 minutes to complete Windows 11 upgrade" "SUCCESS"
+                } else {
+                    # Files incomplete - try to trigger another download
+                    Write-Log "⚠️  Upgrade files incomplete - attempting to restart download process..." "WARNING"
+                    
+                    # Clean incomplete download and restart
+                    try {
+                        Write-Log "🧹 Cleaning incomplete upgrade files..." "INFO"
+                        Remove-Item "C:\`$Windows.~BT" -Recurse -Force -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 3
+                        
+                        # Restart the script to begin fresh download
+                        Write-Log "🔄 Restarting upgrade process to download complete files..." "INFO"
+                        Start-Process "shutdown.exe" -ArgumentList "/r", "/t", "180", "/c", "Restarting to retry Windows 11 upgrade with fresh download - 3 minutes" -WindowStyle Hidden
+                        
+                        if (-not $AutomaticMode) {
+                            Write-Host "🔄 Incomplete files detected - restarting to retry upgrade in 3 minutes" -ForegroundColor Yellow
+                            Write-Host "💡 System will restart and attempt a fresh Windows 11 download" -ForegroundColor Cyan
+                        }
+                    } catch {
+                        Write-Log "❌ Could not clean incomplete files: $($_.Exception.Message)" "ERROR"
+                        Write-Log "🔄 Attempting restart anyway - manual cleanup may be needed" "WARNING"
+                        Start-Process "shutdown.exe" -ArgumentList "/r", "/t", "120", "/c", "Restarting for Windows 11 upgrade - manual cleanup may be needed" -WindowStyle Hidden
+                    }
+                }
             } else {
                 # No upgrade files found
                 Write-Log "❌ No Windows upgrade files found - Installation Assistant exited without upgrading" "ERROR"
