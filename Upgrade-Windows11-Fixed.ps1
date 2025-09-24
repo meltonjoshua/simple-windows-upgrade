@@ -2,7 +2,7 @@
 # WINDOWS 11 UPGRADE SCRIPT - ENTERPRISE EDITION
 # ============================================================================
 # Fully automated Windows 11 upgrade with comprehensive error handling
-# Supports RMM deployment, hardware bypasses, and permission fixes
+# Supports RMM deployment and hardware bypasses
 # Version: 2.0 Enhanced | Last Updated: 2025-09-24
 # ============================================================================
 
@@ -700,11 +700,11 @@ try {
     $CurrentStep++
     Update-Progress "Windows 11 Upgrade" "Downloading Windows 11 Installation Assistant..." $CurrentStep
     
-    # Ensure proper temp directory with full permissions
+    # Ensure temp directory exists
     $TempDir = "C:\Temp"
     $Installer = "$TempDir\Windows11InstallationAssistant.exe"
     
-    # Create temp directory with proper permissions
+    # Create temp directory
     if (-not (Test-Path $TempDir)) {
         try {
             New-Item -Path $TempDir -ItemType Directory -Force | Out-Null
@@ -718,21 +718,7 @@ try {
         }
     }
     
-    # Set full permissions on temp directory for current user and SYSTEM
-    try {
-        $acl = Get-Acl $TempDir
-        $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule($env:USERNAME, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-        $acl.SetAccessRule($accessRule)
-        
-        # Also add SYSTEM permissions
-        $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule("SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-        $acl.SetAccessRule($systemRule)
-        
-        Set-Acl -Path $TempDir -AclObject $acl
-        Write-Log "✅ Set full permissions on temp directory" "SUCCESS"
-    } catch {
-        Write-Log "⚠️  Could not set permissions on temp directory: $($_.Exception.Message)" "WARNING"
-    }
+    Write-Log "✅ Using temp directory: $TempDir" "SUCCESS"
     
     # Remove existing installer if present
     if (Test-Path $Installer) {
@@ -767,16 +753,8 @@ try {
             if (Test-Path $Installer) {
                 $FileSize = (Get-Item $Installer).Length
                 if ($FileSize -gt 1MB) {
-                    # Verify we can write to the file (test permissions)
-                    try {
-                        [System.IO.File]::OpenWrite($Installer).Close()
-                        $downloadSuccess = $true
-                        Write-Log "✅ Downloaded successfully! File size: $([math]::Round($FileSize / 1MB, 2)) MB" "SUCCESS"
-                        Write-Log "✅ Verified write permissions on installer file" "SUCCESS"
-                    } catch {
-                        Write-Log "❌ Download succeeded but cannot write to file: $($_.Exception.Message)" "ERROR"
-                        Remove-Item $Installer -Force -ErrorAction SilentlyContinue
-                    }
+                    $downloadSuccess = $true
+                    Write-Log "✅ Downloaded successfully! File size: $([math]::Round($FileSize / 1MB, 2)) MB" "SUCCESS"
                 } else {
                     Write-Log "❌ Download failed: File too small" "ERROR"
                     Remove-Item $Installer -Force -ErrorAction SilentlyContinue
@@ -913,98 +891,7 @@ try {
     Write-Log "🚀 Running installer with arguments: $argumentString" "INFO"
     Write-Log "🤖 Automatic mode: System will restart automatically when upgrade completes" "INFO"
     
-    # Additional permission and environment setup for Installation Assistant
-    Write-Log "🔧 Preparing Installation Assistant environment..." "INFO"
-    
-    # Create and set permissions on ALL directories the installer might use
-    $criticalDirectories = @(
-        "C:\Windows.old",
-        "C:\ProgramData\Microsoft\Windows\Setup",
-        "C:\Windows\SoftwareDistribution\Download",
-        "C:\Windows\Temp",
-        "$env:USERPROFILE\AppData\Local\Temp",
-        "$env:USERPROFILE\AppData\Local\Microsoft\Windows\INetCache",
-        "$env:LOCALAPPDATA\Microsoft\Windows\Setup",
-        "C:\`$Windows.~BT",
-        "C:\`$Windows.~WS"
-    )
-    
-    foreach ($dir in $criticalDirectories) {
-        if (-not (Test-Path $dir)) {
-            try {
-                New-Item -Path $dir -ItemType Directory -Force | Out-Null
-                Write-Log "✅ Created directory: $dir" "SUCCESS"
-            } catch {
-                Write-Log "⚠️  Could not create directory: $dir" "WARNING"
-                continue
-            }
-        }
-        
-        # Set full permissions on each directory
-        try {
-            $acl = Get-Acl $dir
-            
-            # Add current user permissions
-            $userRule = New-Object System.Security.AccessControl.FileSystemAccessRule($env:USERNAME, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-            $acl.SetAccessRule($userRule)
-            
-            # Add SYSTEM permissions
-            $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule("SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-            $acl.SetAccessRule($systemRule)
-            
-            # Add Administrators permissions
-            $adminRule = New-Object System.Security.AccessControl.FileSystemAccessRule("Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-            $acl.SetAccessRule($adminRule)
-            
-            Set-Acl -Path $dir -AclObject $acl -ErrorAction SilentlyContinue
-            Write-Log "✅ Set permissions on: $dir" "SUCCESS"
-        } catch {
-            Write-Log "⚠️  Could not set permissions on: $dir" "WARNING"
-        }
-    }
-    
-    # Set ALL possible environment variables that Windows installers use
-    $envVars = @{
-        "TEMP" = $TempDir
-        "TMP" = $TempDir
-        "LOCALAPPDATA" = "$env:USERPROFILE\AppData\Local"
-        "ProgramData" = "C:\ProgramData"
-        "ALLUSERSPROFILE" = "C:\ProgramData"
-        "WINDIR" = "C:\Windows"
-        "SYSTEMROOT" = "C:\Windows"
-    }
-    
-    foreach ($var in $envVars.GetEnumerator()) {
-        Set-Item -Path "env:$($var.Key)" -Value $var.Value -Force
-        [Environment]::SetEnvironmentVariable($var.Key, $var.Value, "Process")
-        Write-Log "✅ Set $($var.Key) = $($var.Value)" "SUCCESS"
-    }
-    
-    # Create a completely isolated temp directory for the installer
-    $isolatedTemp = "C:\Windows11Temp"
-    if (-not (Test-Path $isolatedTemp)) {
-        try {
-            New-Item -Path $isolatedTemp -ItemType Directory -Force | Out-Null
-            
-            # Set maximum permissions
-            $isolatedAcl = Get-Acl $isolatedTemp
-            $everyoneRule = New-Object System.Security.AccessControl.FileSystemAccessRule("Everyone", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-            $isolatedAcl.SetAccessRule($everyoneRule)
-            Set-Acl -Path $isolatedTemp -AclObject $isolatedAcl
-            
-            # Override temp variables to use this directory
-            $env:TEMP = $isolatedTemp
-            $env:TMP = $isolatedTemp
-            [Environment]::SetEnvironmentVariable("TEMP", $isolatedTemp, "Process")
-            [Environment]::SetEnvironmentVariable("TMP", $isolatedTemp, "Process")
-            
-            Write-Log "✅ Created isolated temp directory with maximum permissions: $isolatedTemp" "SUCCESS"
-        } catch {
-            Write-Log "⚠️  Could not create isolated temp directory" "WARNING"
-        }
-    }
-    
-    Write-Log "✅ Installation Assistant environment prepared with comprehensive permissions" "SUCCESS"
+
     
     # Clean up scheduled task if it exists (in case this is the post-restart run)
     try {
