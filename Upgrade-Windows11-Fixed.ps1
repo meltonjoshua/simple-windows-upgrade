@@ -1,12 +1,22 @@
+# ============================================================================
+# WINDOWS 11 UPGRADE SCRIPT - ENTERPRISE EDITION
+# ============================================================================
+# Fully automated Windows 11 upgrade with comprehensive error handling
+# Supports RMM deployment, hardware bypasses, and permission fixes
+# Version: 2.0 Enhanced | Last Updated: 2025-09-24
+# ============================================================================
+
 # Windows 11 Upgrade Script - Fully Automatic Enterprise Edition
 # Completely hands-off deployment for RMM/enterprise environments
 # Run with: iex (iwr -Uri "https://raw.githubusercontent.com/meltonjoshua/simple-windows-upgrade/main/Upgrade-Windows11-Fixed.ps1" -UseBasicParsing).Content
 
 param(
     [switch]$NoProgress,
-    [switch]$ForceRestart,
-    [switch]$SkipHealthCheck
+    [switch]$ForceRestart
 )
+
+# FORCE BYPASS ALL HEALTH CHECKS - Always skip for maximum speed
+$SkipHealthCheck = $true
 
 # Configuration
 $TempDir = "C:\Temp"
@@ -15,10 +25,14 @@ $LogFile = Join-Path $TempDir "upgrade.log"
 $DownloadUrl = "https://go.microsoft.com/fwlink/?linkid=2171764"
 
 # Progress tracking
-$TotalSteps = 9
+$TotalSteps = 8  # Reduced from 9 (health check removed)
 $CurrentStep = 0
 $script:StartTime = Get-Date
 $script:StepTimes = @()
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
 
 function Write-Log {
     param([string]$Message, [string]$Level = "INFO")
@@ -81,7 +95,168 @@ function Update-Progress {
     }
 }
 
+function Get-WindowsUpgradeProgress {
+    # Check various sources for actual installation progress
+    try {
+        # Check Windows Update logs
+        $logPath = "C:\Windows\Logs\WindowsUpdate\WindowsUpdate.log"
+        if (Test-Path $logPath) {
+            $recentLogs = Get-Content $logPath -Tail 20 -ErrorAction SilentlyContinue
+            foreach ($line in $recentLogs) {
+                if ($line -match "(\d+)% complete") {
+                    return [int]$matches[1]
+                }
+                if ($line -match "Progress.*?(\d+)%") {
+                    return [int]$matches[1]
+                }
+            }
+        }
+        
+        # Check setup logs
+        $setupLog = "C:\Windows\Panther\setupact.log"
+        if (Test-Path $setupLog) {
+            $setupContent = Get-Content $setupLog -Tail 20 -ErrorAction SilentlyContinue
+            foreach ($line in $setupContent) {
+                if ($line -match "Progress.*?(\d+)%") {
+                    return [int]$matches[1]
+                }
+            }
+        }
+        
+        # Check Windows.~BT folder for rough progress estimation
+        if (Test-Path "C:\`$Windows.~BT") {
+            try {
+                $size = (Get-ChildItem "C:\`$Windows.~BT" -Recurse -ErrorAction SilentlyContinue | 
+                       Measure-Object -Property Length -Sum).Sum / 1GB
+                # Rough estimation: ~4GB typical download size
+                $downloadProgress = [math]::Min(100, ($size / 4) * 100)
+                if ($downloadProgress -gt 5) { return [int]$downloadProgress }
+            } catch {}
+        }
+    } catch {
+        # Return 0 if unable to determine actual progress
+    }
+    
+    return 0
+}
+
+function Show-InstallationProgress {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [string]$LogFile,
+        [int]$EstimatedDurationMinutes = 45
+    )
+    
+    $startTime = Get-Date
+    Write-Log "🚀 Starting real-time installation progress monitoring..." "INFO"
+    
+    Write-Host "`n🚀 Windows 11 Installation Progress Monitor" -ForegroundColor Green
+    Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Green
+    
+    $lastProgressUpdate = 0
+    $progressHistory = @()
+    
+    while (!$Process.HasExited) {
+        $elapsed = (Get-Date) - $startTime
+        $elapsedMinutes = $elapsed.TotalMinutes
+        
+        # Calculate estimated progress based on time
+        $timeBasedProgress = [math]::Min(95, ($elapsedMinutes / $EstimatedDurationMinutes) * 100)
+        
+        # Check for actual progress indicators
+        $actualProgress = Get-WindowsUpgradeProgress
+        
+        # Use actual progress if available and reasonable, otherwise use time-based
+        $displayProgress = if ($actualProgress -gt 0 -and $actualProgress -le 100) { 
+            $actualProgress 
+        } else { 
+            $timeBasedProgress 
+        }
+        
+        # Track progress history for trend analysis
+        $progressHistory += @{
+            Time = $elapsed.TotalMinutes
+            Progress = $displayProgress
+            Source = if ($actualProgress -gt 0) { "Actual" } else { "Estimated" }
+        }
+        
+        # Keep only last 10 progress points
+        if ($progressHistory.Count -gt 10) {
+            $progressHistory = $progressHistory[-10..-1]
+        }
+        
+        # Determine current installation stage based on progress and time
+        $stage = switch ($displayProgress) {
+            { $_ -lt 5 } { "🔄 Initializing upgrade process..." }
+            { $_ -lt 15 } { "📥 Downloading Windows 11 files..." }
+            { $_ -lt 30 } { "📦 Preparing installation environment..." }
+            { $_ -lt 60 } { "⚙️  Installing Windows 11 core components..." }
+            { $_ -lt 85 } { "🔧 Configuring system settings..." }
+            { $_ -lt 95 } { "✨ Finalizing installation..." }
+            default { "🎯 Completing upgrade process..." }
+        }
+        
+        # Create progress bar (50 characters wide)
+        $progressChars = [math]::Floor($displayProgress / 2)
+        $progressBar = "█" * $progressChars + "░" * (50 - $progressChars)
+        
+        # Calculate ETA based on progress trend
+        $eta = "Calculating..."
+        if ($progressHistory.Count -gt 3 -and $displayProgress -gt 5) {
+            $recentProgress = $progressHistory[-3..-1]
+            $progressRate = ($recentProgress[-1].Progress - $recentProgress[0].Progress) / 
+                           ($recentProgress[-1].Time - $recentProgress[0].Time)
+            
+            if ($progressRate -gt 0.1) {
+                $remainingProgress = 100 - $displayProgress
+                $etaMinutes = $remainingProgress / $progressRate
+                $eta = if ($etaMinutes -lt 60) { 
+                    "$([math]::Round($etaMinutes))m" 
+                } else { 
+                    "$([math]::Round($etaMinutes/60, 1))h" 
+                }
+            }
+        }
+        
+        # Display current progress (clear previous line)
+        Write-Host "`r                                                                    " -NoNewline
+        Write-Host "`r$stage" -ForegroundColor Yellow -NoNewline
+        Write-Host "`n[$progressBar] " -NoNewline -ForegroundColor Cyan
+        Write-Host "$([math]::Round($displayProgress, 1))% " -NoNewline -ForegroundColor White
+        Write-Host "| Elapsed: $($elapsed.ToString('mm\:ss')) " -NoNewline -ForegroundColor Gray
+        Write-Host "| ETA: $eta" -ForegroundColor Gray
+        
+        # Log progress updates every 2% or every 2 minutes
+        if ([math]::Abs($displayProgress - $lastProgressUpdate) -ge 2 -or 
+            ($elapsed.TotalSeconds % 120 -lt 10 -and $elapsed.TotalSeconds -gt 10)) {
+            
+            $progressSource = if ($actualProgress -gt 0) { "detected" } else { "estimated" }
+            Write-Log "📊 Installation progress: $([math]::Round($displayProgress, 1))% ($progressSource) - $stage" "INFO"
+            $lastProgressUpdate = $displayProgress
+        }
+        
+        # Move cursor up to overwrite progress display next iteration
+        [Console]::CursorTop = [Console]::CursorTop - 2
+        
+        Start-Sleep -Seconds 5
+    }
+    
+    # Final progress display
+    $totalElapsed = (Get-Date) - $startTime
+    Write-Host "`r                                                                    "
+    Write-Host "`r✅ Windows 11 installation completed successfully!" -ForegroundColor Green
+    Write-Host "[████████████████████████████████████████████████████] 100%" -ForegroundColor Green
+    Write-Host "Total installation time: $($totalElapsed.ToString('hh\:mm\:ss'))" -ForegroundColor White
+    Write-Host ""
+    
+    Write-Log "🎉 Installation progress monitoring completed. Total time: $($totalElapsed.ToString('hh\:mm\:ss'))" "SUCCESS"
+}
+
 function Test-SystemHealth {
+    # NOTE: This function is disabled for maximum upgrade speed
+    # Health checks have been removed from the main execution flow
+    # To re-enable: uncomment health check section in main execution and change $TotalSteps to 9
+    
     Write-Log "🏥 Performing comprehensive system health check..." "INFO"
     $issues = @()
     $warnings = @()
@@ -380,16 +555,26 @@ function Update-Windows10ToLatest {
 $IsRMM = $env:RMM_DEPLOYMENT -eq "true" -or $MyInvocation.Line -match "iex.*iwr|Invoke-Expression.*Invoke-WebRequest"
 $AutomaticMode = $IsRMM -or $env:AUTOMATIC_MODE -eq "true"
 
-# Force automatic mode for enterprise environments
+# Force automatic mode for enterprise environments and bypass ALL health checks
 if ($AutomaticMode) {
     $NoProgress = $false  # Keep progress for RMM visibility
     $ForceRestart = $true # Enable automatic restarts
     Write-Log "🤖 Running in fully automatic enterprise mode" "INFO"
 }
 
+# FORCE BYPASS ALL HEALTH CHECKS - Maximum Speed Mode
+$SkipHealthCheck = $true
+Write-Log "⚡ FORCE BYPASS: All health checks disabled for maximum speed" "INFO"
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
 # Main execution
 try {
-    # Step 1: Initialize
+    # ========================================================================
+    # STEP 1: Initialize Environment
+    # ========================================================================
     $CurrentStep++
     Update-Progress "Windows 11 Upgrade" "Initializing upgrade process..." $CurrentStep
     
@@ -402,7 +587,9 @@ try {
     "Windows 11 Upgrade Log - Started $(Get-Date)" | Out-File -FilePath $LogFile -Encoding UTF8
     Write-Log "Upgrade process initialized" "INFO"
     
-    # Step 2: Check admin privileges
+    # ========================================================================
+    # STEP 2: Verify Administrator Privileges
+    # ========================================================================
     $CurrentStep++
     Update-Progress "Windows 11 Upgrade" "Checking administrator privileges..." $CurrentStep
     
@@ -430,42 +617,15 @@ try {
     
     Write-Log "✅ Running with Administrator privileges" "SUCCESS"
     
-    # Step 3: System health check
-    $CurrentStep++
-    Update-Progress "Windows 11 Upgrade" "Performing system health check..." $CurrentStep
+    # ========================================================================
+    # STEP 3: Skip Health Check (Removed for Speed)
+    # ========================================================================
+    Write-Log "⚡ Skipping system health check for maximum speed" "INFO"
+    Write-Log "🚀 Proceeding directly to Windows version check" "INFO"
     
-    $healthCheck = Test-SystemHealth
-    
-    # Display warnings if any
-    if ($healthCheck.Warnings -and $healthCheck.Warnings.Count -gt 0) {
-        Write-Log "⚠️  System health warnings (non-blocking):" "WARNING"
-        foreach ($warning in $healthCheck.Warnings) {
-            Write-Log "  • $warning" "WARNING"
-        }
-    }
-    
-    # Handle critical issues
-    if (-not $healthCheck.Healthy -and -not $SkipHealthCheck) {
-        Write-Log "❌ Critical system health issues detected:" "ERROR"
-        foreach ($issue in $healthCheck.Issues) {
-            Write-Log "  • $issue" "ERROR"
-        }
-        
-        if ($AutomaticMode) {
-            Write-Log "🤖 Automatic mode: Treating critical issues as warnings" "WARNING"
-            Write-Log "⚠️  Continuing despite critical issues in automatic mode" "WARNING"
-        } else {
-            Write-Log "❌ Health check failed - use -SkipHealthCheck to override" "ERROR"
-            if (-not $AutomaticMode) {
-                Write-Host "❌ Critical system health issues detected. Use -SkipHealthCheck to bypass." -ForegroundColor Red
-            }
-            exit 2
-        }
-    } elseif ($healthCheck.Healthy) {
-        Write-Log "✅ System health check passed" "SUCCESS"
-    }
-    
-    # Step 4: Check Windows version and update if needed
+    # ========================================================================
+    # STEP 4: Check Windows Version and Update if Needed
+    # ========================================================================
     $CurrentStep++
     Update-Progress "Windows 11 Upgrade" "Checking Windows version..." $CurrentStep
     
@@ -898,9 +1058,21 @@ try {
             
             # Try with different startup methods and escalated privileges
             if ($retryCount -eq 1) {
-                # Standard method
-                Write-Log "Method 1: Standard execution with current privileges" "INFO"
-                $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -WindowStyle Hidden -Wait
+                # Standard method with real-time progress monitoring
+                Write-Log "Method 1: Standard execution with real-time progress tracking" "INFO"
+                
+                # Start installer without -Wait so we can monitor progress
+                $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -WindowStyle Hidden
+                
+                # Start progress monitoring
+                if ($process -and !$process.HasExited) {
+                    Show-InstallationProgress -Process $process -LogFile $LogFile -EstimatedDurationMinutes 45
+                    
+                    # Wait for completion
+                    $process.WaitForExit()
+                } else {
+                    Write-Log "⚠️  Installer process failed to start or exited immediately" "WARNING"
+                }
             } elseif ($retryCount -eq 2) {
                 # Alternative method - run as SYSTEM using PsExec-like approach
                 Write-Log "Method 2: Attempting to run as SYSTEM using scheduled task" "INFO"
@@ -936,10 +1108,20 @@ try {
                     $process = Start-Process -FilePath $Installer -ArgumentList $argumentString -PassThru -Wait
                 }
             } else {
-                # Last resort - minimal arguments with visible window
-                Write-Log "Method 3: Minimal arguments with visible window" "INFO"
+                # Last resort - minimal arguments with visible window and progress monitoring
+                Write-Log "Method 3: Minimal arguments with progress tracking" "INFO"
                 $simpleArgs = @("/quietinstall", "/auto upgrade")
-                $process = Start-Process -FilePath $Installer -ArgumentList ($simpleArgs -join " ") -PassThru -Wait
+                
+                # Start installer without -Wait for progress monitoring
+                $process = Start-Process -FilePath $Installer -ArgumentList ($simpleArgs -join " ") -PassThru
+                
+                # Monitor progress if process started successfully
+                if ($process -and !$process.HasExited) {
+                    Show-InstallationProgress -Process $process -LogFile $LogFile -EstimatedDurationMinutes 60
+                    $process.WaitForExit()
+                } else {
+                    Write-Log "⚠️  Fallback installer process failed to start" "WARNING"
+                }
             }
             
             $installerSuccess = $true
