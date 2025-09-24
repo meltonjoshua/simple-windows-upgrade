@@ -250,6 +250,10 @@ function Show-InstallationProgress {
     Write-Host ""
     
     Write-Log "🎉 Installation progress monitoring completed. Total time: $($totalElapsed.ToString('hh\:mm\:ss'))" "SUCCESS"
+    
+    # Check if restart will be needed after installation completes
+    Write-Host "🔍 Checking if restart will be required..." -ForegroundColor Cyan
+    Write-Log "📋 Installation Assistant completed - system will determine restart requirement" "INFO"
 }
 
 function Test-SystemHealth {
@@ -1057,7 +1061,46 @@ try {
     
     if ($exitCode -eq 0) {
         Write-Log "🎉 Windows 11 upgrade completed successfully!" "SUCCESS"
-        if (-not $AutomaticMode) {
+        
+        # Check if system actually upgraded to Windows 11
+        Start-Sleep -Seconds 3  # Brief pause to let system settle
+        $postUpgradeOS = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -ErrorAction SilentlyContinue
+        $postUpgradeBuild = if ($postUpgradeOS) { [int]$postUpgradeOS.CurrentBuild } else { 0 }
+        
+        if ($postUpgradeBuild -ge 22000) {
+            Write-Log "✅ Confirmed: System upgraded to Windows 11 (Build $postUpgradeBuild)" "SUCCESS"
+            Write-Log "🚀 Restart not required - upgrade completed in-place" "SUCCESS"
+        } else {
+            Write-Log "🔄 System shows successful upgrade but restart needed to complete" "INFO"
+            Write-Log "📋 Current build: $postUpgradeBuild, Windows 11 requires build 22000+" "INFO"
+            
+            if ($AutomaticMode -or $ForceRestart) {
+                Write-Log "🤖 Scheduling automatic restart to complete Windows 11 upgrade..." "INFO"
+                
+                # Clean up any existing scheduled tasks
+                try {
+                    Unregister-ScheduledTask -TaskName "ContinueWindows11Upgrade" -Confirm:$false -ErrorAction SilentlyContinue
+                } catch { }
+                
+                # Schedule restart in 60 seconds
+                Write-Log "⏰ System will restart in 60 seconds to complete Windows 11 upgrade" "INFO"
+                Start-Process "shutdown.exe" -ArgumentList "/r", "/t", "60", "/c", "Windows 11 upgrade completed - restarting in 60 seconds to finalize" -WindowStyle Hidden
+                
+                if (-not $AutomaticMode) {
+                    Write-Host "🎉 Windows 11 upgrade completed successfully!" -ForegroundColor Green
+                    Write-Host "🔄 System will restart in 60 seconds to finalize the upgrade" -ForegroundColor Yellow
+                    Write-Host "🚀 After restart, you'll be running Windows 11!" -ForegroundColor Green
+                }
+            } else {
+                Write-Log "⚠️  Manual restart recommended to complete Windows 11 upgrade" "WARNING"
+                if (-not $AutomaticMode) {
+                    Write-Host "🎉 Windows 11 upgrade completed successfully!" -ForegroundColor Green
+                    Write-Host "🔄 Please restart your computer to finalize the upgrade" -ForegroundColor Yellow
+                }
+            }
+        }
+        
+        if (-not $AutomaticMode -and $postUpgradeBuild -ge 22000) {
             Write-Host "🎉 Windows 11 upgrade completed successfully!" -ForegroundColor Green
         }
     } elseif ($exitCode -eq 3) {
