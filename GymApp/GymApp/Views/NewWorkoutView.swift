@@ -5,7 +5,6 @@ struct NewWorkoutView: View {
     @Environment(\.dismiss) var dismiss
     
     @State private var workoutName = ""
-    @State private var selectedExercises: [Exercise] = []
     @State private var workoutExercises: [WorkoutExercise] = []
     @State private var notes = ""
     @State private var startTime = Date()
@@ -58,7 +57,7 @@ struct NewWorkoutView: View {
                 }
             }
             .sheet(isPresented: $showingExercisePicker) {
-                ExercisePickerView(selectedExercises: $selectedExercises, onSelect: addExercise)
+                ExercisePickerView(onSelect: addExercise)
             }
         }
     }
@@ -92,7 +91,6 @@ struct NewWorkoutView: View {
 struct ExercisePickerView: View {
     @Environment(\.dismiss) var dismiss
     @EnvironmentObject var workoutStore: WorkoutStore
-    @Binding var selectedExercises: [Exercise]
     let onSelect: (Exercise) -> Void
     
     var body: some View {

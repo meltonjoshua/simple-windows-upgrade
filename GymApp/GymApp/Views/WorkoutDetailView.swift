@@ -88,8 +88,17 @@ struct WorkoutDetailView: View {
 
 struct WorkoutDetailView_Previews: PreviewProvider {
     static var previews: some View {
+        let store = WorkoutStore()
+        let sampleWorkout = store.workouts.first ?? Workout(
+            name: "Sample Workout",
+            date: Date(),
+            duration: 3600,
+            exercises: [],
+            notes: ""
+        )
+        
         NavigationView {
-            WorkoutDetailView(workout: WorkoutStore().workouts.first!)
+            WorkoutDetailView(workout: sampleWorkout)
         }
     }
 }
