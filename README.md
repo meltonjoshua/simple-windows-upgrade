@@ -1,4 +1,44 @@
-# Simple Windows 11 Upgrade Script
+# Repository Contents
+
+This repository contains two main projects:
+
+1. **Windows 11 Upgrade Scripts** - PowerShell scripts for Windows 11 deployment
+2. **GymApp** - Complete iOS fitness tracking application
+
+---
+
+## 📱 GymApp - iOS Fitness Tracker
+
+A complete, production-ready iOS application built with SwiftUI for tracking workouts, exercises, and fitness progress.
+
+### Quick Links
+- [GymApp README](GymApp/README.md) - Comprehensive documentation
+- [Quick Start Guide](GymApp/QUICK_START.md) - Get started quickly
+- [App Overview](GymApp/APP_OVERVIEW.md) - Technical architecture details
+
+### Features
+- ✅ Workout tracking with sets, reps, and weights
+- ✅ Exercise library with 10+ pre-loaded exercises
+- ✅ Statistics and progress tracking
+- ✅ User profile management
+- ✅ Data persistence with UserDefaults
+- ✅ Built with SwiftUI and modern iOS patterns
+
+### Requirements
+- iOS 16.0+
+- Xcode 15.0+
+- Swift 5.9+
+
+### Getting Started
+```bash
+cd GymApp
+open GymApp.xcodeproj
+# Press Cmd+R in Xcode to build and run
+```
+
+---
+
+## 💻 Simple Windows 11 Upgrade Script
 
 A PowerShell script designed for silent deployment of Windows 11 upgrades through Remote Monitoring and Management (RMM) systems.
 
